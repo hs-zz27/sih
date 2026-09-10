@@ -1,24 +1,26 @@
-"""FastAPI application - Step 0 stubs.
+"""FastAPI application.
 
-Every route below returns hardcoded data shaped exactly like ``src/contracts``.
-That is the point: H1-H5 and M1-M6 get built against this at the same time, and
-M7 swaps the fake calls for real orchestrator calls without the interface layer
-changing a line.
+Every route returns data shaped exactly like ``src/contracts``. Response models
+have not changed since Step 0 - M7 swapped the bodies underneath them, so the
+interface layer needed no edits.
 
-Rules for this file:
+Status:
 
-* Response models never change during M7 - only the bodies do.
-* Anything still fake is marked ``# STUB (M7)`` or ``# STUB (H<n>)`` so the
-  remaining fakes are greppable: ``grep -rn "STUB (" src/``.
+* **M-side routes are live.** ``/api/tools``, ``/api/documents``, ``/api/search``,
+  ``/api/index`` and the ``/api/tasks`` family run the real engine.
+* **H-side routes are still stubs**: ingestion extraction (H1) and the audit /
+  network monitor (H4). They stay marked ``# STUB (H<n>)`` so the remaining
+  fakes are greppable: ``grep -rn "STUB (" src/``.
 * No hardcoded hosts or paths - read them from ``src.config``.
 
-Run it with:  ``.venv/bin/uvicorn src.api.main:app --reload``
+Run it with:  ``uvicorn src.api.main:app --reload``
 """
 
 from __future__ import annotations
 
 import asyncio
 import shutil
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -35,6 +37,7 @@ from src.contracts import (
     Document,
     IngestResult,
     NetworkStatus,
+    SourceCitation,
     StreamEvent,
     TaskRequest,
     TaskType,
@@ -42,10 +45,40 @@ from src.contracts import (
     new_id,
     utcnow,
 )
+from src.core.orchestrator import Orchestrator, get_orchestrator
+from src.core.router import RoutingDecision
+
+
+def engine() -> Orchestrator:
+    """The core engine (M7).
+
+    Resolved per request rather than at import so that starting the API never
+    depends on a model server being up: an unreachable Ollama surfaces as a
+    FAILED result with an explanation, not as a process that will not boot.
+    """
+    return get_orchestrator()
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Build the engine at boot instead of during the first request.
+
+    Constructing the orchestrator loads the embedding model from disk, which
+    costs a few seconds. Paying that on the judges' first query looks exactly
+    like a slow agent, so it is paid here. Failures are reported and swallowed:
+    a workbench that cannot pre-warm must still start and explain itself through
+    /api/health.
+    """
+    try:
+        await asyncio.to_thread(engine().health)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[startup] pre-warm skipped: {exc.__class__.__name__}: {exc}")
+    yield
+
 
 app = FastAPI(
+    lifespan=lifespan,
     title=config.get("app.name", "Sovereign AI Workbench"),
-    version="0.1.0-step0",
+    version="0.2.0-core-engine",
     description=(
         "Local-only agentic workbench. Every route is served from localhost; "
         "the API makes no outbound calls."
@@ -62,9 +95,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory task store. Step 0 only - it exists so the SSE trace endpoint has
-# something to look up after POST /api/tasks. M7 replaces it with the real
-# orchestrator's run registry.
+# Mirror of the orchestrator's run registry, kept so a task submitted before an
+# engine reload is still resolvable by the UI. The orchestrator is authoritative.
 _TASKS: dict[str, AgentResult] = {}
 
 
@@ -75,7 +107,19 @@ _TASKS: dict[str, AgentResult] = {}
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "version": app.version, "time": utcnow().isoformat()}
+    """Liveness plus engine readiness.
+
+    M7 adds the engine block: whether the local inference server is reachable,
+    which configured models it actually has pulled, and the state of the index.
+    Checking this before a rehearsal is cheaper than discovering mid-demo that
+    a model was never pulled.
+    """
+    return {
+        "status": "ok",
+        "version": app.version,
+        "time": utcnow().isoformat(),
+        "engine": engine().health(),
+    }
 
 
 @app.get("/api/config")
@@ -98,62 +142,11 @@ def public_config() -> dict[str, Any]:
 def list_tools() -> list[ToolSpec]:
     """Tool registry as the UI should display it.
 
-    STUB (M3): mirrors the five tools M3 will register. Kept here so the UI can
-    render tool names and schemas before the registry exists.
+    M3: the live registry. Names and schemas here are the ones the agent is
+    actually offered in its prompt, so what the UI lists cannot drift from what
+    the model can call.
     """
-    return [
-        ToolSpec(
-            name="read_file",
-            description="Read a text file from the local workspace.",
-            input_schema={
-                "type": "object",
-                "properties": {"path": {"type": "string"}},
-                "required": ["path"],
-            },
-        ),
-        ToolSpec(
-            name="write_file",
-            description="Write a text file into the workspace.",
-            input_schema={
-                "type": "object",
-                "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
-                "required": ["path", "content"],
-            },
-        ),
-        ToolSpec(
-            name="list_files",
-            description="List files under a workspace directory.",
-            input_schema={
-                "type": "object",
-                "properties": {"directory": {"type": "string"}},
-                "required": ["directory"],
-            },
-        ),
-        ToolSpec(
-            name="search_documents",
-            description=(
-                "Semantic search over the local SOP/manual corpus. Returns passages "
-                "with their source document and page."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "top_k": {"type": "integer", "default": config.get("rag.top_k", 5)},
-                },
-                "required": ["query"],
-            },
-        ),
-        ToolSpec(
-            name="run_python",
-            description="Execute Python in a sandboxed subprocess with no network access.",
-            input_schema={
-                "type": "object",
-                "properties": {"code": {"type": "string"}},
-                "required": ["code"],
-            },
-        ),
-    ]
+    return engine().tool_specs()
 
 
 # ---------------------------------------------------------------------------
@@ -198,9 +191,28 @@ async def ingest(file: UploadFile) -> IngestResult:
 def list_documents() -> list[Document]:
     """Indexed corpus, for the source-attribution browser.
 
-    STUB (M6): served from fixtures until the Chroma index is populated.
+    M6: served from the live local index. Empty until a corpus is indexed via
+    POST /api/index or pushed in by the ingestion pipeline.
     """
-    return fakes.fake_documents()
+    return engine().list_documents()
+
+
+@app.post("/api/index")
+def reindex_corpus() -> dict[str, Any]:
+    """Re-index the text corpus directory (M6).
+
+    Exposed so the demo can be reset between rehearsals without restarting the
+    process, and so H5's corpus can be loaded once it exists.
+    """
+    orchestrator = engine()
+    chunks = orchestrator.index_corpus()
+    return {"indexed_chunks": chunks, **orchestrator.index.stats()}
+
+
+@app.get("/api/search", response_model=list[SourceCitation])
+def search_corpus(query: str, top_k: int | None = None) -> list[SourceCitation]:
+    """Direct retrieval, for the source-attribution browser and for debugging."""
+    return engine().search(query, top_k)
 
 
 # ---------------------------------------------------------------------------
@@ -209,24 +221,27 @@ def list_documents() -> list[Document]:
 
 
 @app.post("/api/tasks", response_model=AgentResult)
-def create_task(request: TaskRequest) -> AgentResult:
-    """Run a task to completion and return the full result.
+def create_task(request: TaskRequest, background: bool = False) -> AgentResult:
+    """Run a task through the real agent loop (M7).
 
-    STUB (M7): returns a canned five-step trace. The routing decision is faked
-    from ``task_type_hint`` or a keyword sniff so the UI badge has something
-    non-constant to render.
+    ``background=false`` (default) runs to completion and returns the finished
+    result - the simple path, unchanged from Step 0.
+
+    ``background=true`` returns a RUNNING result immediately and executes on a
+    worker thread, so ``/api/tasks/{id}/stream`` delivers the trace live as the
+    agent works. That is the mode the demo UI should use: a real run takes tens
+    of seconds, and a spinner for all of it wastes the most persuasive thing we
+    have to show.
     """
-    task_type = request.task_type_hint or _guess_task_type(request.task)
-    model = config.get(f"models.{task_type.value}", "qwen2.5:7b-instruct")
-
-    result = fakes.fake_result(request.task_id, task_type=task_type, model=model)
+    orchestrator = engine()
+    result = orchestrator.start(request) if background else orchestrator.run(request)
     _TASKS[result.task_id] = result
     return result
 
 
 @app.get("/api/tasks/{task_id}", response_model=AgentResult)
 def get_task(task_id: str) -> AgentResult:
-    result = _TASKS.get(task_id)
+    result = engine().get_result(task_id) or _TASKS.get(task_id)
     if result is None:
         raise HTTPException(status_code=404, detail=f"Unknown task {task_id}")
     return result
@@ -236,39 +251,71 @@ def get_task(task_id: str) -> AgentResult:
 async def stream_task(task_id: str) -> StreamingResponse:
     """Server-sent events for the live step trace - H3's visual centrepiece.
 
-    Event names: ``routing`` | ``step`` | ``result`` | ``done``.
+    Event names: ``routing`` | ``step`` | ``result`` | ``done``. Shapes unchanged
+    from Step 0.
 
-    STUB (M7): replays the stored result with a delay between steps so the trace
-    animates the way a real run will. The event shapes are final.
+    M7: drains the real agent loop. For a task started with ``background=true``
+    the steps arrive here as the agent produces them; for one already finished,
+    the stored trace is replayed so the endpoint behaves the same either way.
     """
-    result = _TASKS.get(task_id)
-    if result is None:
+    orchestrator = engine()
+    known = orchestrator.get_result(task_id) or _TASKS.get(task_id)
+    if known is None:
         raise HTTPException(status_code=404, detail=f"Unknown task {task_id}")
 
     async def event_stream() -> AsyncIterator[str]:
         def encode(event: StreamEvent) -> str:
             return f"event: {event.event}\ndata: {event.model_dump_json()}\n\n"
 
-        yield encode(
-            StreamEvent(
-                event="routing",
-                task_id=task_id,
-                payload={
-                    "task_type": result.task_type.value,
-                    "model_used": result.model_used,
-                    "reason": result.routing_reason,
-                },
-            )
-        )
+        # The agent loop is synchronous, so each pull is awaited on a worker
+        # thread. Pulling one item at a time (rather than draining the whole
+        # iterator) is what keeps the trace live: a step reaches the browser the
+        # moment the agent finishes it, and a slow model call never blocks the
+        # other requests the UI is making.
+        iterator = orchestrator.events(task_id)
+        sentinel = object()
+        final: AgentResult | None = None
+        routed = False
 
-        for step in result.steps:
-            await asyncio.sleep(0.6)  # STUB (M7): stands in for real model latency
+        while True:
+            item = await asyncio.to_thread(next, iterator, sentinel)
+            if item is sentinel:
+                break
+
+            if isinstance(item, AgentResult):
+                final = item
+            elif isinstance(item, RoutingDecision):
+                # Emitted by the agent rather than guessed here: for a background
+                # run the task type is not known until the agent has routed, and
+                # the badge must name the model that actually ran.
+                routed = True
+                yield encode(
+                    StreamEvent(event="routing", task_id=task_id, payload=item.as_step_metadata())
+                )
+            else:
+                yield encode(
+                    StreamEvent(event="step", task_id=task_id, payload=item.model_dump(mode="json"))
+                )
+
+        final = final or orchestrator.get_result(task_id) or known
+
+        if not routed:
+            # Nothing streamed a decision (an empty replay). Fall back to the
+            # stored result so the UI always receives a routing event.
             yield encode(
-                StreamEvent(event="step", task_id=task_id, payload=step.model_dump(mode="json"))
+                StreamEvent(
+                    event="routing",
+                    task_id=task_id,
+                    payload={
+                        "task_type": final.task_type.value,
+                        "model": final.model_used,
+                        "reason": final.routing_reason,
+                    },
+                )
             )
 
         yield encode(
-            StreamEvent(event="result", task_id=task_id, payload=result.model_dump(mode="json"))
+            StreamEvent(event="result", task_id=task_id, payload=final.model_dump(mode="json"))
         )
         yield encode(StreamEvent(event="done", task_id=task_id))
 
@@ -277,23 +324,6 @@ async def stream_task(task_id: str) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-def _guess_task_type(task: str) -> TaskType:
-    """Crude keyword router.
-
-    STUB (M2): ``src/core/router.py`` replaces this with a model-backed
-    classification. The contract - a TaskType plus a human-readable reason - does
-    not change.
-    """
-    lowered = task.lower()
-    code_words = ("python", "script", "code", "calculate", "compute", "plot", "debug")
-    document_words = ("report", "approval", "note", "sop", "inspection", "docx", "summar")
-    if any(word in lowered for word in code_words):
-        return TaskType.CODE
-    if any(word in lowered for word in document_words):
-        return TaskType.DOCUMENT
-    return TaskType.GENERAL
 
 
 # ---------------------------------------------------------------------------

@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
-from src.contracts import AgentResult, IngestResult, NetworkStatus, TaskType
+from src.contracts import AgentResult, IngestResult, NetworkStatus, TaskStatus, TaskType
 
 client = TestClient(app)
 
@@ -71,14 +71,46 @@ def test_router_is_visible_in_the_result(task: str, expected: TaskType) -> None:
     assert result.routing_reason, "the routing badge needs a reason (M2)"
 
 
-def test_task_result_carries_steps_sources_and_deliverables() -> None:
+def test_task_result_is_well_formed_and_retrievable() -> None:
+    """Shape invariants that hold with or without a model server running.
+
+    Updated at M7: the stub version also asserted that ``sources`` and
+    ``deliverables`` were non-empty, but those were properties of the canned
+    data. Sources now depend on the corpus actually being indexed, and
+    deliverables on H2, so asserting them here tested the fake rather than the
+    contract. The per-field invariants below are the durable part; content
+    assertions live in the tests that control their own fixtures.
+    """
     result = AgentResult.model_validate(
         client.post("/api/tasks", json={"task": "Review inspection report E-4102"}).json()
     )
+
     assert [step.step_number for step in result.steps] == list(range(1, len(result.steps) + 1))
-    assert result.sources and all(source.page >= 1 for source in result.sources)
-    assert result.deliverables
+    assert all(source.page >= 1 for source in result.sources)
+    assert all(deliverable.filename for deliverable in result.deliverables)
+    assert result.status in set(TaskStatus)
+    assert result.final_text.strip(), "every result must say something the UI can render"
     assert client.get(f"/api/tasks/{result.task_id}").status_code == 200
+
+
+def test_a_dead_model_server_is_reported_as_a_failed_result_not_a_500() -> None:
+    """The demo must never show a stack trace.
+
+    With no local model running, a task comes back as a FAILED AgentResult
+    carrying an explanation - a shape the UI already knows how to render.
+    """
+    from src.core.orchestrator import get_orchestrator
+
+    if get_orchestrator().health().get("inference_available"):
+        pytest.skip("local inference server is up; this covers the unreachable case")
+
+    response = client.post("/api/tasks", json={"task": "Review inspection report E-4102"})
+    assert response.status_code == 200, "an unreachable model is a result, not a server error"
+
+    result = AgentResult.model_validate(response.json())
+    assert result.status is TaskStatus.FAILED
+    assert result.error
+    assert "ollama" in result.final_text.lower(), "tell the operator how to fix it"
 
 
 def test_stream_emits_routing_then_steps_then_result() -> None:
