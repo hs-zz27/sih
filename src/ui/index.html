@@ -244,7 +244,10 @@
   </div>
 
   <script>
-    const API_BASE = 'http://127.0.0.1:8000';
+    // Same-origin by default: the UI is served from this FastAPI app, so a
+    // relative base avoids CORS entirely. Overridable for dev (npm-served UI
+    // pointed at a separately running API on another port).
+    const API_BASE = window.WORKBENCH_API_BASE || '';
     let currentTaskId = null;
     let currentFile = null;
 

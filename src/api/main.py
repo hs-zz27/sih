@@ -100,8 +100,9 @@ app = FastAPI(
     ),
 )
 
-# Dev-only: the UI runs on its own port until it is served from this origin for
-# the demo. Origins come from config.yaml so no host is written down twice.
+# CORS origins are for a UI dev server running on its own port. The route below
+# now serves the UI from this same origin, so CORS is not on the demo's path -
+# this stays only for local frontend development.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.get("server.cors_origins", []),
@@ -113,6 +114,25 @@ app.add_middleware(
 # Mirror of the orchestrator's run registry, kept so a task submitted before an
 # engine reload is still resolvable by the UI. The orchestrator is authoritative.
 _TASKS: dict[str, AgentResult] = {}
+
+_UI_INDEX = Path(__file__).resolve().parent.parent / "ui" / "index.html"
+
+
+# ---------------------------------------------------------------------------
+# H3 - web UI
+# ---------------------------------------------------------------------------
+
+
+@app.get("/", include_in_schema=False)
+def ui_root() -> FileResponse:
+    """Serve the workbench UI from the same origin as the API.
+
+    A single self-contained HTML file (no build step, no CDN assets - see
+    PROPOSAL.md s2.4), so this is the whole of H3's serving concern.
+    """
+    if not _UI_INDEX.is_file():
+        raise HTTPException(status_code=500, detail=f"UI file missing: {_UI_INDEX}")
+    return FileResponse(_UI_INDEX, media_type="text/html")
 
 
 # ---------------------------------------------------------------------------
