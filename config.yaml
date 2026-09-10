@@ -94,6 +94,9 @@ audit:
     - "127.0.0.1"
     - "localhost"
     - "::1"
+  # H4 - how often the out-of-process lsof observer polls. Lower = more
+  # responsive corroboration, higher = less overhead during the demo.
+  monitor_interval_s: 2.0
 
 server:
   host: "127.0.0.1"
