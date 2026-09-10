@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -49,8 +50,8 @@ class PollResult:
     error: str | None = None
 
 
-def _process_tree_pids(root_pid: int | None = None) -> list[int]:
-    """Our own PID plus every descendant (the sandbox subprocess included)."""
+def _process_tree_pids_posix(root_pid: int | None = None) -> list[int]:
+    """Our own PID plus every descendant, via pgrep."""
     root_pid = root_pid or os.getpid()
     try:
         output = subprocess.run(
@@ -65,13 +66,13 @@ def _process_tree_pids(root_pid: int | None = None) -> list[int]:
 
     pids = [root_pid]
     for child in children:
-        pids.extend(_process_tree_pids(child))
+        pids.extend(_process_tree_pids_posix(child))
     return pids
 
 
-def poll_once() -> PollResult:
-    """One `lsof -i` snapshot of established/listening connections we hold."""
-    pids = _process_tree_pids()
+def _poll_lsof() -> PollResult:
+    """One `lsof -i` snapshot of connections held by our process tree."""
+    pids = _process_tree_pids_posix()
     pid_args: list[str] = []
     for pid in pids:
         pid_args += ["-p", str(pid)]
@@ -116,6 +117,135 @@ def poll_once() -> PollResult:
 
     external = [conn for conn in connections if not is_local(conn.remote_host)]
     return PollResult(connections=connections, external=external)
+
+
+# ---------------------------------------------------------------------------
+# Windows backend
+#
+# `lsof` and `pgrep` do not exist on Windows, so without this the observer
+# returns an error and contributes nothing - on a Windows demo machine the
+# second evidence layer would be silently dead, which is the worst way for it
+# to fail. `netstat -ano` is present on every Windows install and reports the
+# owning PID, which is all this layer needs.
+# ---------------------------------------------------------------------------
+
+# netstat -ano row: proto, local, foreign, state, pid  (UDP rows omit state)
+_NETSTAT_ROW = re.compile(
+    r"^\s*(?P<proto>TCP|UDP)\s+(?P<local>\S+)\s+(?P<foreign>\S+)\s+"
+    r"(?:(?P<state>[A-Z_]+)\s+)?(?P<pid>\d+)\s*$"
+)
+
+
+def _windows_process_table() -> dict[int, tuple[int, str]]:
+    """pid -> (parent_pid, name), read once per poll via CIM."""
+    try:
+        completed = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                "Get-CimInstance Win32_Process | "
+                "ForEach-Object { \"$($_.ProcessId)`t$($_.ParentProcessId)`t$($_.Name)\" }",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return {}
+
+    table: dict[int, tuple[int, str]] = {}
+    for line in completed.stdout.splitlines():
+        parts = line.split("	")
+        if len(parts) != 3:
+            continue
+        try:
+            table[int(parts[0])] = (int(parts[1]), parts[2].strip())
+        except ValueError:
+            continue
+    return table
+
+
+def _process_tree_pids_windows(table: dict[int, tuple[int, str]]) -> set[int]:
+    """Our PID plus every descendant, walked from the CIM parent map."""
+    root = os.getpid()
+    children: dict[int, list[int]] = {}
+    for pid, (parent, _name) in table.items():
+        children.setdefault(parent, []).append(pid)
+
+    seen: set[int] = set()
+    stack = [root]
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue          # defensive: PID reuse can make the map cyclic
+        seen.add(pid)
+        stack.extend(children.get(pid, []))
+    return seen
+
+
+def _split_host_port(endpoint: str) -> tuple[str, int] | None:
+    """Split netstat's "addr:port", allowing for bracketed IPv6."""
+    if endpoint.startswith("["):                       # [::1]:443
+        host, _, port = endpoint.rpartition("]:")
+        return (host.lstrip("["), int(port)) if port.isdigit() else None
+    host, _, port = endpoint.rpartition(":")
+    return (host, int(port)) if port.isdigit() and host else None
+
+
+def _poll_netstat() -> PollResult:
+    """One `netstat -ano` snapshot, filtered to our own process tree."""
+    table = _windows_process_table()
+    if not table:
+        return PollResult(error="could not read the Windows process table - monitor cannot corroborate netguard")
+    our_pids = _process_tree_pids_windows(table)
+
+    try:
+        completed = subprocess.run(
+            ["netstat", "-ano"], capture_output=True, text=True, timeout=15,
+        )
+    except FileNotFoundError:
+        return PollResult(error="netstat is not available - the monitor cannot corroborate netguard")
+    except subprocess.TimeoutExpired:
+        return PollResult(error="netstat poll timed out")
+
+    connections: list[ObservedConnection] = []
+    for line in completed.stdout.splitlines():
+        match = _NETSTAT_ROW.match(line)
+        if not match:
+            continue
+
+        pid = int(match.group("pid"))
+        if pid not in our_pids:
+            continue                                   # someone else's socket
+
+        state = match.group("state") or "UDP"
+        if state == "LISTENING":
+            continue                                   # not egress; matches the lsof path
+
+        remote = _split_host_port(match.group("foreign"))
+        if remote is None or remote[1] == 0:
+            continue                                   # 0.0.0.0:0 = no peer
+
+        connections.append(
+            ObservedConnection(
+                pid=pid,
+                command=table.get(pid, (0, "unknown"))[1],
+                remote_host=remote[0],
+                remote_port=remote[1],
+                state=state,
+            )
+        )
+
+    external = [conn for conn in connections if not is_local(conn.remote_host)]
+    return PollResult(connections=connections, external=external)
+
+
+def poll_once() -> PollResult:
+    """One snapshot of the connections our process tree currently holds.
+
+    Dispatches to whichever observer this platform has. Both backends report the
+    same shape, so `NetworkMonitor` and the audit trail do not care which ran.
+    """
+    if sys.platform == "win32":
+        return _poll_netstat()
+    return _poll_lsof()
 
 
 class NetworkMonitor:

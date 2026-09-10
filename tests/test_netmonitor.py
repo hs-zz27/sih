@@ -18,9 +18,10 @@ from src.io import audit, netmonitor
 # The observer shells out to a platform tool. Where that tool is absent the
 # monitor degrades to an error string by design, so these tests skip rather than
 # fail - a red suite on a teammate's machine hides real regressions.
+_PROBE = netmonitor.poll_once()   # one probe, not one per attribute
 pytestmark = pytest.mark.skipif(
-    netmonitor.poll_once().error is not None,
-    reason=f"no out-of-process observer on this platform: {netmonitor.poll_once().error}",
+    _PROBE.error is not None,
+    reason=f"no out-of-process observer on this platform: {_PROBE.error}",
 )
 
 
