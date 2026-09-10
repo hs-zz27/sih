@@ -136,6 +136,11 @@ class ToolRegistry:
             )
 
         try:
+            arguments = _coerce_arguments(arguments, spec.input_schema or {})
+        except ToolError as exc:
+            return ToolOutcome(ok=False, error=f"{name}: {exc}")
+
+        try:
             outcome = spec.handler(**arguments)  # type: ignore[misc]
         except ToolError as exc:
             return ToolOutcome(ok=False, error=str(exc))
@@ -155,20 +160,78 @@ class ToolRegistry:
         return outcome
 
 
+def _coerce_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+    """Nudge argument types towards what the schema declares.
+
+    Small models emit ``{"top_k": "3"}`` and ``{"code": 12}`` constantly. Each
+    one would otherwise surface as a confusing ``AttributeError`` from deep
+    inside a handler, and cost a demo turn. Coerce what is unambiguous, and
+    refuse the rest with a message naming the expected type.
+    """
+    properties = (schema or {}).get("properties", {}) or {}
+    coerced = dict(arguments)
+
+    for key, value in arguments.items():
+        expected = (properties.get(key) or {}).get("type")
+        if expected is None or value is None:
+            continue
+
+        if expected == "string" and not isinstance(value, str):
+            if isinstance(value, (int, float, bool)):
+                coerced[key] = str(value)
+            else:
+                raise ToolError(f"{key} must be a string, got {type(value).__name__}.")
+
+        elif expected == "integer" and not isinstance(value, int):
+            try:
+                coerced[key] = int(str(value).strip())
+            except (TypeError, ValueError):
+                raise ToolError(f"{key} must be an integer, got {value!r}.") from None
+
+        elif expected == "number" and not isinstance(value, (int, float)):
+            try:
+                coerced[key] = float(str(value).strip())
+            except (TypeError, ValueError):
+                raise ToolError(f"{key} must be a number, got {value!r}.") from None
+
+        elif expected == "boolean" and not isinstance(value, bool):
+            text = str(value).strip().lower()
+            if text in {"true", "1", "yes"}:
+                coerced[key] = True
+            elif text in {"false", "0", "no"}:
+                coerced[key] = False
+            else:
+                raise ToolError(f"{key} must be true or false, got {value!r}.")
+
+    return coerced
+
+
 # ---------------------------------------------------------------------------
 # Path confinement
 # ---------------------------------------------------------------------------
 
 
-def allowed_roots() -> list[Path]:
-    """Directories the filesystem tools may touch, resolved from config."""
-    keys = ("sandbox.workdir", "app.corpus_dir", "app.uploads_dir", "app.downloads_dir")
+def allowed_roots(workspace: Path | None = None) -> list[Path]:
+    """Directories the filesystem tools may touch.
+
+    ``workspace`` overrides the configured sandbox directory and is listed
+    first, so it is where a relative write lands. The registry passes the
+    workdir of the sandbox it was actually built with: without that, an
+    injected sandbox writes to one directory while ``read_file`` looks in
+    another, which in tests means quietly touching the real ``data/sandbox``.
+    """
     roots: list[Path] = []
+    if workspace is not None:
+        roots.append(Path(workspace).resolve())
+
+    keys = ("sandbox.workdir", "app.corpus_dir", "app.uploads_dir", "app.downloads_dir")
     for key in keys:
         try:
-            roots.append(config.get_path(key).resolve())
+            candidate = config.get_path(key).resolve()
         except KeyError:
             continue
+        if candidate not in roots:
+            roots.append(candidate)
     return roots
 
 
@@ -220,22 +283,24 @@ def _within(path: Path, roots: list[Path]) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _tool_read_file(path: str) -> ToolOutcome:
-    target = resolve_within_roots(path)
+def _read_file(path: str, roots: list[Path]) -> ToolOutcome:
+    target = resolve_within_roots(path, roots)
 
+    # Suffix first: telling the model to use search_documents for a PDF is the
+    # useful answer whether or not that particular PDF happens to exist.
+    if target.suffix.lower() not in _READABLE_SUFFIXES:
+        raise ToolError(
+            f"{target.suffix or 'This file type'} is not readable as text. "
+            "PDFs and images must go through the ingestion pipeline, then be reached with search_documents."
+        )
     if not target.exists():
-        nearby = _suggest(target.name)
+        nearby = _suggest(target.name, roots)
         raise ToolError(
             f"No file at {path!r}."
             + (f" Did you mean one of: {nearby}?" if nearby else " Use list_files to see what exists.")
         )
     if target.is_dir():
         raise ToolError(f"{path!r} is a directory. Use list_files for directories.")
-    if target.suffix.lower() not in _READABLE_SUFFIXES:
-        raise ToolError(
-            f"{target.suffix or 'This file type'} is not readable as text. "
-            "PDFs and images must go through the ingestion pipeline, then be reached with search_documents."
-        )
 
     text = target.read_text(encoding="utf-8", errors="replace")
     truncated = len(text) > _MAX_READ_CHARS
@@ -248,8 +313,8 @@ def _tool_read_file(path: str) -> ToolOutcome:
     )
 
 
-def _tool_write_file(path: str, content: str) -> ToolOutcome:
-    target = resolve_within_roots(path)
+def _write_file(path: str, content: str, roots: list[Path]) -> ToolOutcome:
+    target = resolve_within_roots(path, roots)
     if target.suffix.lower() not in _READABLE_SUFFIXES:
         raise ToolError(
             f"write_file only writes text files ({', '.join(sorted(_READABLE_SUFFIXES))}). "
@@ -267,8 +332,8 @@ def _tool_write_file(path: str, content: str) -> ToolOutcome:
     )
 
 
-def _tool_list_files(directory: str = ".") -> ToolOutcome:
-    target = resolve_within_roots(directory)
+def _list_files(directory: str, roots: list[Path]) -> ToolOutcome:
+    target = resolve_within_roots(directory, roots)
     if not target.exists():
         raise ToolError(f"No directory at {directory!r}.")
     if not target.is_dir():
@@ -341,13 +406,13 @@ def _make_run_python(sandbox: Sandbox) -> Callable[..., ToolOutcome]:
     return _tool_run_python
 
 
-def _suggest(filename: str, limit: int = 3) -> str:
+def _suggest(filename: str, roots: list[Path], limit: int = 3) -> str:
     """Nearby filenames, so a wrong guess costs one step instead of three."""
     stem = Path(filename).stem.lower()[:4]
     if not stem:
         return ""
     matches: list[str] = []
-    for root in allowed_roots():
+    for root in roots:
         for item in root.rglob("*"):
             if item.is_file() and stem in item.name.lower():
                 matches.append(item.name)
@@ -365,6 +430,9 @@ def build_registry(index: RagIndex | None = None, sandbox: Sandbox | None = None
     """The five MVP tools, wired to the live index and sandbox."""
     index = index or get_index()
     sandbox = sandbox or get_sandbox()
+    # Bound to THIS sandbox's workdir, so the registry and the sandbox always
+    # agree about where the workspace is.
+    roots = allowed_roots(sandbox.workdir)
     registry = ToolRegistry()
 
     registry.register(
@@ -379,7 +447,7 @@ def build_registry(index: RagIndex | None = None, sandbox: Sandbox | None = None
                 "properties": {"path": {"type": "string", "description": "File name or path."}},
                 "required": ["path"],
             },
-            handler=_tool_read_file,
+            handler=lambda path, _roots=roots: _read_file(path, _roots),
         )
     )
 
@@ -398,7 +466,7 @@ def build_registry(index: RagIndex | None = None, sandbox: Sandbox | None = None
                 },
                 "required": ["path", "content"],
             },
-            handler=_tool_write_file,
+            handler=lambda path, content, _roots=roots: _write_file(path, content, _roots),
         )
     )
 
@@ -413,7 +481,7 @@ def build_registry(index: RagIndex | None = None, sandbox: Sandbox | None = None
                 },
                 "required": [],
             },
-            handler=_tool_list_files,
+handler=lambda directory=".", _roots=roots: _list_files(directory, _roots),
         )
     )
 

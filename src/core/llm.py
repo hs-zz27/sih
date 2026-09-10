@@ -137,6 +137,8 @@ class LLMClient:
         # trust_env=False stops httpx picking up HTTP_PROXY/HTTPS_PROXY from the
         # environment. A proxy would route our 'local' call off the machine.
         self._client = httpx.Client(timeout=self.timeout_s, trust_env=False)
+        # (checked_at, available, models) - see probe()
+        self._probe_cache: tuple[float, bool, list[str]] | None = None
 
     # -- lifecycle --------------------------------------------------------
 
@@ -151,26 +153,43 @@ class LLMClient:
 
     # -- health -----------------------------------------------------------
 
-    def is_available(self) -> bool:
-        """Cheap reachability probe. Used to fall back to stubs, never to retry."""
+    def probe(self, max_age_s: float = 5.0) -> tuple[bool, list[str]]:
+        """Reachability and the models the local server has pulled, in one call.
+
+        Cached briefly. A refused connection on Windows loopback costs about two
+        seconds, so a UI polling ``/api/health`` while Ollama is down would stall
+        its panel on every tick; and asking twice for what one request answers
+        doubled that for no reason.
+        """
+        now = time.monotonic()
+        if self._probe_cache is not None and (now - self._probe_cache[0]) < max_age_s:
+            return self._probe_cache[1], self._probe_cache[2]
+
+        models: list[str] = []
+        available = False
         try:
-            url = f"{self.endpoint}/api/tags" if self.api_style == "ollama" else f"{self.endpoint}/v1/models"
-            return self._client.get(url, timeout=3.0).status_code < 500
-        except httpx.HTTPError:
-            return False
+            if self.api_style == "ollama":
+                response = self._client.get(f"{self.endpoint}/api/tags", timeout=3.0)
+                response.raise_for_status()
+                models = [m.get("name", "") for m in response.json().get("models", [])]
+            else:
+                response = self._client.get(f"{self.endpoint}/v1/models", timeout=3.0)
+                response.raise_for_status()
+                models = [m.get("id", "") for m in response.json().get("data", [])]
+            available = True
+        except (httpx.HTTPError, ValueError):
+            available, models = False, []
+
+        self._probe_cache = (now, available, models)
+        return available, models
+
+    def is_available(self) -> bool:
+        """Cheap reachability probe. Used to report status, never to retry."""
+        return self.probe()[0]
 
     def available_models(self) -> list[str]:
         """Model names the local server currently has loaded or pulled."""
-        try:
-            if self.api_style == "ollama":
-                response = self._client.get(f"{self.endpoint}/api/tags", timeout=5.0)
-                response.raise_for_status()
-                return [m.get("name", "") for m in response.json().get("models", [])]
-            response = self._client.get(f"{self.endpoint}/v1/models", timeout=5.0)
-            response.raise_for_status()
-            return [m.get("id", "") for m in response.json().get("data", [])]
-        except httpx.HTTPError:
-            return []
+        return self.probe()[1]
 
     # -- generation -------------------------------------------------------
 

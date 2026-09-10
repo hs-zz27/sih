@@ -16,6 +16,7 @@ import pytest
 
 from src.contracts import (
     AgentResult,
+    AgentStep,
     Document,
     StepStatus,
     TaskRequest,
@@ -242,8 +243,64 @@ def test_write_then_read_roundtrip(registry: ToolRegistry):
 
 
 def test_binary_files_are_refused_with_a_useful_explanation(registry: ToolRegistry, tmp_path: Path):
+    """A real .pdf on disk, so the suffix guard is what refuses it.
+
+    The earlier version of this test used a filename that did not exist, so it
+    passed on the missing-file path and never reached the suffix check at all.
+    """
+    (tmp_path / "work").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "work" / "scan.pdf").write_bytes(b"%PDF-1.4 binary junk")
+
     outcome = registry.dispatch("read_file", {"path": "scan.pdf"})
     assert not outcome.ok
+    assert "not readable as text" in outcome.error
+    assert "search_documents" in outcome.error, "point the model at the tool that does work"
+
+
+def test_tools_are_confined_to_the_sandbox_they_were_built_with(tmp_path: Path):
+    """Regression: the registry used to read its roots from config only.
+
+    That meant an injected sandbox wrote to one directory while read_file looked
+    in another - and in tests it quietly touched the real data/sandbox.
+    """
+    workspace = tmp_path / "isolated"
+    registry = build_registry(
+        index=RagIndex(index_dir=tmp_path / "index", backend="tfidf"),
+        sandbox=Sandbox(workdir=workspace),
+    )
+
+    written = registry.dispatch("write_file", {"path": "scratch.md", "content": "local only"})
+    assert written.ok
+    assert Path(written.artifacts[0]).parent == workspace.resolve()
+
+    read_back = registry.dispatch("read_file", {"path": "scratch.md"})
+    assert read_back.ok and "local only" in read_back.output
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ({"query": "thickness", "top_k": "2"}, 2),   # models emit "2", not 2
+        ({"query": "thickness", "top_k": 2}, 2),
+    ],
+)
+def test_numeric_arguments_sent_as_strings_are_coerced(registry: ToolRegistry, arguments, expected):
+    outcome = registry.dispatch("search_documents", arguments)
+    assert outcome.ok
+    assert outcome.metadata["hits"] <= expected
+
+
+def test_a_wrongly_typed_argument_is_explained_not_crashed(registry: ToolRegistry):
+    """Previously surfaced as a bare AttributeError from inside the handler."""
+    outcome = registry.dispatch("search_documents", {"query": "x", "top_k": "many"})
+    assert not outcome.ok
+    assert "top_k" in outcome.error and "integer" in outcome.error
+
+
+def test_numbers_sent_where_a_string_is_expected_are_coerced(registry: ToolRegistry):
+    outcome = registry.dispatch("run_python", {"code": 123})
+    # Coerced to "123", which is valid Python that simply prints nothing.
+    assert outcome.ok or "exit code" in (outcome.error or "")
 
 
 def test_prompt_description_lists_every_tool(registry: ToolRegistry):
@@ -397,9 +454,13 @@ def test_a_tool_failure_is_observed_and_recovered_from(registry: ToolRegistry):
 
 
 def test_step_cap_truncates_with_partial_results(registry: ToolRegistry):
-    """A runaway loop mid-demo is fatal, so the cap is enforced by the loop."""
+    """A runaway loop mid-demo is fatal, so the cap is enforced by the loop.
+
+    Each call differs, so this exercises the cap itself rather than the
+    repeated-call guard below.
+    """
     agent, _ = make_agent(
-        [tool_call("Again.", "search_documents", query="thickness") for _ in range(20)],
+        [tool_call("Again.", "search_documents", query=f"thickness {i}") for i in range(20)],
         registry,
         max_steps=4,
     )
@@ -408,12 +469,50 @@ def test_step_cap_truncates_with_partial_results(registry: ToolRegistry):
     assert result.status is TaskStatus.TRUNCATED
     assert len(result.steps) == 4, "the cap is hard"
     assert result.final_text.strip(), "a truncated run must still return something usable"
-    assert "escalated" in result.final_text or "step" in result.final_text.lower()
+
+
+def test_identical_repeated_calls_are_short_circuited(registry: ToolRegistry):
+    """The top demo risk is a model that loops on one working call.
+
+    The repeat is answered from the result we already have - the tool is not run
+    again - and the observation says plainly that repeating is not progress.
+    """
+    same = tool_call("Searching again.", "search_documents", query="thickness")
+    agent, _ = make_agent([same] * 12, registry, max_steps=8)
+    result = agent.run(TaskRequest(task="Summarise the inspection report"))
+
+    assert result.status is TaskStatus.TRUNCATED
+    assert len(result.steps) < 8, "a stuck agent must stop early, not burn the whole cap"
+    assert result.steps[0].status is StepStatus.OK, "the first call is genuine work"
+    assert result.steps[1].metadata.get("repeated") is True
+    assert "already called" in result.steps[1].tool_output
+    assert result.error and "identical" in result.error
+
+
+def test_a_repeated_call_still_carries_the_earlier_result(registry: ToolRegistry):
+    """The nudge must include the answer, or the model has nothing to act on."""
+    same = tool_call("Again.", "search_documents", query="wall thickness escalation")
+    agent, _ = make_agent([same] * 5, registry, max_steps=8)
+    result = agent.run(TaskRequest(task="Summarise the report"))
+
+    assert "escalated" in result.steps[1].tool_output.lower()
+
+
+def test_the_cap_warning_never_creates_two_user_turns_in_a_row(registry: ToolRegistry):
+    """Chat models expect alternating roles; small ones degrade without it."""
+    agent, client = make_agent(
+        [tool_call("Step.", "search_documents", query=f"q{i}") for i in range(20)], registry, max_steps=4
+    )
+    agent.run(TaskRequest(task="Summarise the report"))
+
+    roles = [message.role for message in client.calls[-1]]
+    consecutive = [i for i in range(len(roles) - 1) if roles[i] == roles[i + 1] == "user"]
+    assert not consecutive, f"consecutive user turns at {consecutive}: {roles}"
 
 
 def test_the_model_is_warned_before_the_cap_hits(registry: ToolRegistry):
     agent, client = make_agent(
-        [tool_call("Again.", "search_documents", query="thickness") for _ in range(20)], registry, max_steps=4
+        [tool_call("Again.", "search_documents", query=f"thickness {i}") for i in range(20)], registry, max_steps=4
     )
     agent.run(TaskRequest(task="Summarise the report"))
     conversation = "\n".join(m.content for m in client.calls[-1])
@@ -465,15 +564,19 @@ def test_every_step_is_renderable_by_the_ui(registry: ToolRegistry):
         assert step.started_at is not None
 
 
-def test_stream_yields_steps_before_the_result(registry: ToolRegistry):
+def test_stream_yields_routing_then_steps_then_result(registry: ToolRegistry):
+    """Routing is emitted by the agent so it is computed exactly once per run."""
+    from src.core.router import RoutingDecision
+
     agent, _ = make_agent(
         [tool_call("Look it up.", "search_documents", query="hydrotest"), final("Done.")], registry
     )
     emitted = list(agent.stream(TaskRequest(task="Summarise the report")))
 
+    assert isinstance(emitted[0], RoutingDecision)
     assert isinstance(emitted[-1], AgentResult)
-    assert all(not isinstance(item, AgentResult) for item in emitted[:-1])
-    assert len(emitted) == 3
+    assert len(emitted) == 4  # routing + 2 steps + result
+    assert all(isinstance(item, AgentStep) for item in emitted[1:-1])
 
 
 # ---------------------------------------------------------------------------
@@ -586,7 +689,7 @@ def test_background_run_streams_steps_as_they_happen(tmp_path: Path):
     assert pending.task_id == request.task_id
 
     emitted = list(orchestrator.events(request.task_id))
-    steps = [item for item in emitted if not isinstance(item, AgentResult)]
+    steps = [item for item in emitted if isinstance(item, AgentStep)]
     results = [item for item in emitted if isinstance(item, AgentResult)]
 
     assert len(results) == 1
@@ -594,6 +697,54 @@ def test_background_run_streams_steps_as_they_happen(tmp_path: Path):
     assert isinstance(emitted[-1], AgentResult)
     assert results[0].status is TaskStatus.COMPLETED
     assert "75.8" in results[0].final_text
+
+
+def test_start_returns_without_routing_on_the_request_thread(tmp_path: Path):
+    """Routing can cost a model call; start() must not pay for it.
+
+    Regression test: start() used to call the router itself, so an ambiguous
+    task blocked the POST for the length of a model call, and the run was then
+    routed a second time inside the agent.
+    """
+    import time
+
+    class SlowClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, model, temperature=None, max_tokens=None, stop=None):
+            self.calls += 1
+            time.sleep(0.8)
+            return Completion(text=final("done"), model=model)
+
+    from src.core.orchestrator import Orchestrator
+
+    slow = SlowClient()
+    orchestrator = Orchestrator(
+        client=slow,  # type: ignore[arg-type]
+        index=RagIndex(index_dir=tmp_path / "index", backend="tfidf"),
+        sandbox=Sandbox(workdir=tmp_path / "work"),
+    )
+
+    started = time.perf_counter()
+    # "compute the report" is ambiguous, so it reaches the model tie-break.
+    orchestrator.start(TaskRequest(task="compute the report"))
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.3, f"start() blocked for {elapsed:.2f}s - it must not route"
+
+
+def test_events_cleans_up_when_the_consumer_walks_away(tmp_path: Path):
+    """A closed browser tab must not pin a run's steps in memory."""
+    orchestrator = _orchestrator_with([final("Done.")], tmp_path)
+    request = TaskRequest(task="Summarise the report")
+    orchestrator.start(request)
+
+    stream = orchestrator.events(request.task_id)
+    next(stream)          # take the routing event, then abandon the generator
+    stream.close()
+
+    assert request.task_id not in orchestrator._queues
 
 
 def test_events_replays_a_finished_run(tmp_path: Path):

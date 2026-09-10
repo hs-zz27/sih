@@ -24,13 +24,14 @@ from src.contracts import (
     SourceCitation,
     TaskRequest,
     TaskStatus,
+    TaskType,
     ToolSpec,
     utcnow,
 )
 from src.core.agent import Agent
 from src.core.llm import InferenceError, LLMClient, SovereigntyError
 from src.core.rag import RagIndex, get_index
-from src.core.router import Router
+from src.core.router import Router, RoutingDecision
 from src.core.sandbox import Sandbox, get_sandbox
 from src.core.tools import ToolRegistry, build_registry
 
@@ -51,9 +52,11 @@ class Orchestrator:
         self.index = index or get_index()
         self.sandbox = sandbox or get_sandbox()
         self.registry: ToolRegistry = build_registry(index=self.index, sandbox=self.sandbox)
-        self.router = Router()
+        # Shares the orchestrator's client, resolved lazily so building the
+        # orchestrator never touches the network.
+        self.router = Router(client_provider=lambda: self.client)
         self._results: dict[str, AgentResult] = {}
-        self._queues: dict[str, "queue.Queue[AgentStep | AgentResult | None]"] = {}
+        self._queues: dict[str, "queue.Queue[RoutingDecision | AgentStep | AgentResult | None]"] = {}
         self._lock = threading.Lock()
 
     # -- lazy client ------------------------------------------------------
@@ -77,10 +80,10 @@ class Orchestrator:
             "index": self.index.stats(),
         }
         try:
-            client = self.client
+            available, models = self.client.probe()
             payload["endpoint_is_local"] = True
-            payload["inference_available"] = client.is_available()
-            payload["models_present"] = client.available_models()
+            payload["inference_available"] = available
+            payload["models_present"] = models
         except SovereigntyError as exc:
             payload.update({"endpoint_is_local": False, "inference_available": False, "error": str(exc)})
         except Exception as exc:  # noqa: BLE001
@@ -123,7 +126,7 @@ class Orchestrator:
         self._results[result.task_id] = result
         return result
 
-    def stream(self, request: TaskRequest) -> Iterator[AgentStep | AgentResult]:
+    def stream(self, request: TaskRequest) -> Iterator[RoutingDecision | AgentStep | AgentResult]:
         """Yield steps live, then the final result. Backs the SSE trace endpoint."""
         try:
             for item in self._agent(request).stream(request):
@@ -150,13 +153,17 @@ class Orchestrator:
         POST returns a RUNNING result straight away and the SSE endpoint drains
         steps as the agent produces them.
         """
+        # Deliberately does NOT route here. Routing can cost a model call, so
+        # doing it on this thread would make "returns immediately" a lie, and
+        # doing it here *and* in the agent would run it twice per task. The
+        # agent yields the real decision as the stream's first item.
         pending = AgentResult(
             task_id=request.task_id,
             status=TaskStatus.RUNNING,
-            task_type=self.router.route(request.task, request.task_type_hint).task_type,
+            task_type=request.task_type_hint or TaskType.GENERAL,
         )
 
-        events: "queue.Queue[AgentStep | AgentResult | None]" = queue.Queue()
+        events: "queue.Queue[RoutingDecision | AgentStep | AgentResult | None]" = queue.Queue()
         with self._lock:
             self._queues[request.task_id] = events
             self._results[request.task_id] = pending
@@ -171,34 +178,51 @@ class Orchestrator:
         threading.Thread(target=worker, name=f"agent-{request.task_id}", daemon=True).start()
         return pending
 
-    def events(self, task_id: str, timeout_s: float | None = None) -> Iterator[AgentStep | AgentResult]:
+    def events(
+        self, task_id: str, timeout_s: float | None = None
+    ) -> Iterator[RoutingDecision | AgentStep | AgentResult]:
         """Drain a background run's steps as they arrive.
 
         Falls back to replaying a finished result, so the endpoint behaves the
-        same whether the UI connects mid-run or after it.
+        same whether the UI connects mid-run, after it, or not at all.
         """
         with self._lock:
             events = self._queues.get(task_id)
 
         if events is None:
-            stored = self._results.get(task_id)
-            if stored is not None:
-                yield from stored.steps
-                yield stored
+            yield from self._replay(task_id)
             return
 
         limit = timeout_s if timeout_s is not None else float(config.get("agent.wall_clock_timeout_s", 180)) + 30
-        while True:
-            try:
-                item = events.get(timeout=limit)
-            except queue.Empty:
-                return
-            if item is None:
-                break
-            yield item
+        try:
+            while True:
+                try:
+                    item = events.get(timeout=limit)
+                except queue.Empty:
+                    return
+                if item is None:
+                    break
+                yield item
+        finally:
+            # Runs on normal completion AND when the consumer abandons the
+            # generator (browser tab closed mid-run), so an undrained queue
+            # cannot pin a whole run's steps in memory for the session.
+            with self._lock:
+                self._queues.pop(task_id, None)
 
-        with self._lock:
-            self._queues.pop(task_id, None)
+    def _replay(self, task_id: str) -> Iterator[RoutingDecision | AgentStep | AgentResult]:
+        """Re-emit a finished run in the same order a live one arrives in."""
+        stored = self._results.get(task_id)
+        if stored is None:
+            return
+        yield RoutingDecision(
+            task_type=stored.task_type,
+            model=stored.model_used,
+            reason=stored.routing_reason,
+            method="replay",
+        )
+        yield from stored.steps
+        yield stored
 
     def _failed(self, request: TaskRequest, error: str) -> AgentResult:
         """A failure the UI can render as a result rather than a dead spinner."""

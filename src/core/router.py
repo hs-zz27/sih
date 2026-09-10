@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Callable
 
 from src import config
 from src.contracts import TaskType
@@ -108,11 +109,30 @@ class RoutingDecision:
 
 
 class Router:
-    """Selects a task type and the model configured for it."""
+    """Selects a task type and the model configured for it.
 
-    def __init__(self, client: LLMClient | None = None, use_llm_tiebreak: bool = True) -> None:
+    ``client_provider`` lets the orchestrator hand over its own client lazily.
+    Without it the router builds a client of its own on every tie-break, which
+    both bypasses an injected client and opens a fresh connection instead of
+    reusing the one the agent is already talking through.
+    """
+
+    def __init__(
+        self,
+        client: LLMClient | None = None,
+        use_llm_tiebreak: bool = True,
+        client_provider: Callable[[], LLMClient] | None = None,
+    ) -> None:
         self._client = client
+        self._client_provider = client_provider
         self._use_llm_tiebreak = use_llm_tiebreak
+
+    def _resolve_client(self) -> LLMClient:
+        if self._client is not None:
+            return self._client
+        if self._client_provider is not None:
+            return self._client_provider()
+        return LLMClient()
 
     # -- public -----------------------------------------------------------
 
@@ -224,8 +244,7 @@ class Router:
     def _classify_with_model(self, task: str) -> TaskType | None:
         """Ask the local model to classify. Returns None on any failure."""
         try:
-            client = self._client or LLMClient()
-            completion = client.chat(
+            completion = self._resolve_client().chat(
                 messages=[
                     Message(
                         role="system",

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -45,6 +46,7 @@ from src.contracts import (
     utcnow,
 )
 from src.core.orchestrator import Orchestrator, get_orchestrator
+from src.core.router import RoutingDecision
 
 
 def engine() -> Orchestrator:
@@ -56,7 +58,25 @@ def engine() -> Orchestrator:
     """
     return get_orchestrator()
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Build the engine at boot instead of during the first request.
+
+    Constructing the orchestrator loads the embedding model from disk, which
+    costs a few seconds. Paying that on the judges' first query looks exactly
+    like a slow agent, so it is paid here. Failures are reported and swallowed:
+    a workbench that cannot pre-warm must still start and explain itself through
+    /api/health.
+    """
+    try:
+        await asyncio.to_thread(engine().health)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[startup] pre-warm skipped: {exc.__class__.__name__}: {exc}")
+    yield
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title=config.get("app.name", "Sovereign AI Workbench"),
     version="0.2.0-core-engine",
     description=(
@@ -247,18 +267,6 @@ async def stream_task(task_id: str) -> StreamingResponse:
         def encode(event: StreamEvent) -> str:
             return f"event: {event.event}\ndata: {event.model_dump_json()}\n\n"
 
-        yield encode(
-            StreamEvent(
-                event="routing",
-                task_id=task_id,
-                payload={
-                    "task_type": known.task_type.value,
-                    "model_used": known.model_used,
-                    "reason": known.routing_reason,
-                },
-            )
-        )
-
         # The agent loop is synchronous, so each pull is awaited on a worker
         # thread. Pulling one item at a time (rather than draining the whole
         # iterator) is what keeps the trace live: a step reaches the browser the
@@ -267,19 +275,45 @@ async def stream_task(task_id: str) -> StreamingResponse:
         iterator = orchestrator.events(task_id)
         sentinel = object()
         final: AgentResult | None = None
+        routed = False
 
         while True:
             item = await asyncio.to_thread(next, iterator, sentinel)
             if item is sentinel:
                 break
+
             if isinstance(item, AgentResult):
                 final = item
+            elif isinstance(item, RoutingDecision):
+                # Emitted by the agent rather than guessed here: for a background
+                # run the task type is not known until the agent has routed, and
+                # the badge must name the model that actually ran.
+                routed = True
+                yield encode(
+                    StreamEvent(event="routing", task_id=task_id, payload=item.as_step_metadata())
+                )
             else:
                 yield encode(
                     StreamEvent(event="step", task_id=task_id, payload=item.model_dump(mode="json"))
                 )
 
         final = final or orchestrator.get_result(task_id) or known
+
+        if not routed:
+            # Nothing streamed a decision (an empty replay). Fall back to the
+            # stored result so the UI always receives a routing event.
+            yield encode(
+                StreamEvent(
+                    event="routing",
+                    task_id=task_id,
+                    payload={
+                        "task_type": final.task_type.value,
+                        "model": final.model_used,
+                        "reason": final.routing_reason,
+                    },
+                )
+            )
+
         yield encode(
             StreamEvent(event="result", task_id=task_id, payload=final.model_dump(mode="json"))
         )

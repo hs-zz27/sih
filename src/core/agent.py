@@ -46,6 +46,10 @@ from src.core.tools import ToolRegistry
 # degrades for reasons that are invisible in the trace.
 _MAX_OBSERVATION_CHARS = 4000
 
+# How many times the agent may repeat one identical tool call before the run is
+# treated as stuck. Two nudges is generous; a third is a loop, not a retry.
+_MAX_IDENTICAL_REPEATS = 2
+
 
 @dataclass
 class _Decision:
@@ -86,18 +90,29 @@ class Agent:
         assert result is not None  # stream always ends with a result
         return result
 
-    def stream(self, request: TaskRequest) -> Iterator[AgentStep | AgentResult]:
-        """Yield each ``AgentStep`` as it completes, then the final ``AgentResult``.
+    def stream(self, request: TaskRequest) -> Iterator[RoutingDecision | AgentStep | AgentResult]:
+        """Yield the routing decision, then each ``AgentStep``, then the result.
 
         The API's SSE endpoint consumes this directly, so the UI trace fills in
         as the agent works rather than appearing all at once at the end.
+
+        The routing decision is yielded rather than computed by the caller so it
+        is made exactly once per run: routing may itself cost a model call, and
+        doing it twice both doubles that cost and risks the badge disagreeing
+        with the model that actually ran.
         """
         started = time.perf_counter()
         deadline = started + self.timeout_s
 
         decision = self.router.route(request.task, request.task_type_hint)
+        yield decision
+
         steps: list[AgentStep] = []
         citations: list[SourceCitation] = []
+        # Signature -> observation, so an identical repeat is answered from
+        # what we already have instead of being run again.
+        executed: dict[str, str] = {}
+        repeats: dict[str, int] = {}
 
         conversation = [
             Message(
@@ -124,7 +139,14 @@ class Agent:
 
             remaining = max_steps - step_number
             if remaining <= 2:
-                conversation.append(Message(role="user", content=prompts.step_cap_warning(remaining)))
+                # Appended to the trailing user turn rather than added as a new
+                # one: chat models expect strictly alternating roles, and two
+                # user messages in a row degrades output on small models.
+                notice = prompts.step_cap_warning(remaining)
+                if conversation and conversation[-1].role == "user":
+                    conversation[-1] = Message(role="user", content=conversation[-1].content + notice)
+                else:
+                    conversation.append(Message(role="user", content=notice.strip()))
 
             step_started = time.perf_counter()
 
@@ -210,8 +232,51 @@ class Agent:
                 break
 
             # --- 4. act ---------------------------------------------------
+            # A small model that finds one working tool call will happily make
+            # it eight times and time the demo out. The step cap bounds that but
+            # does not fix it: answer the repeat from what we already have, and
+            # say plainly that repeating is not progress.
+            signature = f"{parsed.tool}:{json.dumps(parsed.tool_input, sort_keys=True, default=str)}"
+
+            if signature in executed:
+                repeats[signature] = repeats.get(signature, 0) + 1
+                observation = (
+                    f"You already called {parsed.tool} with exactly these arguments and got the "
+                    "result below. Calling it again will not produce anything new - use this "
+                    "result, call a different tool, or give your final answer now.\n\n"
+                    f"{executed[signature]}"
+                )
+                step = self._step(
+                    step_number,
+                    thought=parsed.thought,
+                    tool=parsed.tool,
+                    tool_input=parsed.tool_input,
+                    tool_output=observation,
+                    status=StepStatus.ERROR,
+                    model=completion.model,
+                    started=step_started,
+                    metadata={"stage": "tool", "repeated": True, "repeat_count": repeats[signature]},
+                )
+                steps.append(step)
+                yield step
+
+                if repeats[signature] >= _MAX_IDENTICAL_REPEATS:
+                    status = TaskStatus.TRUNCATED
+                    error = (
+                        f"Stopped early: the agent called {parsed.tool} with identical arguments "
+                        f"{repeats[signature] + 1} times without making progress."
+                    )
+                    break
+
+                conversation.append(Message(role="assistant", content=parsed.raw))
+                conversation.append(Message(role="user", content=observation))
+                continue
+
             outcome = self.registry.dispatch(parsed.tool, parsed.tool_input)
             observation = _truncate(outcome.as_observation())
+
+            if outcome.ok:
+                executed[signature] = observation
 
             if outcome.citations:
                 citations.extend(outcome.citations)
