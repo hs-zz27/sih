@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sovereign AI Workbench</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --navy: #1B2A4A;
+      --grey: #555;
+      --light: #F5F5F5;
+      --ok: #D9EAD3;
+      --refer: #FCE5CD;
+      --critical: #F4CCCC;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: var(--light);
+      color: var(--grey);
+      line-height: 1.6;
+    }
+    header {
+      background: var(--navy);
+      color: white;
+      padding: 20px 40px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    header h1 { font-size: 24px; font-weight: 600; }
+    header p { font-size: 13px; opacity: 0.9; margin-top: 4px; }
+
+    .container { max-width: 1400px; margin: 40px auto; padding: 0 20px; }
+
+    .grid { display: grid; grid-template-columns: 350px 1fr 300px; gap: 30px; }
+    @media (max-width: 1200px) { .grid { grid-template-columns: 1fr; } }
+
+    .panel {
+      background: white;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      padding: 20px;
+    }
+    .panel h2 {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--navy);
+      margin-bottom: 16px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .form-group { margin-bottom: 16px; }
+    label { display: block; font-size: 12px; font-weight: 500; margin-bottom: 6px; }
+    input[type="text"], textarea, select {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 13px;
+      font-family: inherit;
+    }
+    textarea { resize: vertical; min-height: 100px; }
+    input[type="file"] { font-size: 12px; }
+
+    button {
+      width: 100%;
+      padding: 10px;
+      background: var(--navy);
+      color: white;
+      border: none;
+      border-radius: 4px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:hover { background: #0F1A2E; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .badge {
+      display: inline-block;
+      padding: 6px 12px;
+      background: var(--refer);
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 500;
+      margin-bottom: 12px;
+    }
+
+    .status { font-size: 12px; color: #999; margin-top: 8px; }
+    .status.running { color: #4285F4; }
+    .status.done { color: #34A853; }
+    .status.error { color: #EA4335; }
+
+    .trace { max-height: 600px; overflow-y: auto; }
+    .step {
+      border-left: 4px solid #ddd;
+      padding: 12px;
+      margin-bottom: 12px;
+      background: #fafafa;
+      border-radius: 3px;
+    }
+    .step.active { border-left-color: #4285F4; background: #f0f7ff; }
+    .step.ok { border-left-color: #34A853; }
+    .step.error { border-left-color: #EA4335; }
+
+    .step-num {
+      font-weight: 600;
+      color: var(--navy);
+      font-size: 13px;
+      margin-bottom: 4px;
+    }
+    .step-thought { font-size: 13px; color: #666; margin-bottom: 8px; line-height: 1.4; }
+    .step-tool {
+      background: white;
+      padding: 8px;
+      border-radius: 3px;
+      font-size: 12px;
+      font-family: 'Monaco', 'Courier New', monospace;
+      margin-bottom: 6px;
+    }
+    .step-tool strong { color: var(--navy); }
+
+    .sources { margin-top: 16px; padding-top: 16px; border-top: 1px solid #eee; }
+    .source {
+      font-size: 12px;
+      margin-bottom: 12px;
+      padding: 8px;
+      background: #fffbf0;
+      border-left: 3px solid #FFB81C;
+      border-radius: 2px;
+    }
+    .source-label { font-weight: 600; color: var(--navy); }
+    .source-text { font-size: 11px; color: #666; margin-top: 4px; line-height: 1.3; }
+
+    .deliverables { margin-top: 16px; }
+    .deliverable {
+      font-size: 12px;
+      padding: 8px;
+      background: #f0f7ff;
+      border-radius: 4px;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .deliverable a {
+      color: #4285F4;
+      text-decoration: none;
+      font-weight: 500;
+    }
+
+    .network-status {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      padding: 16px;
+      margin-top: 20px;
+    }
+    .network-status h3 { font-size: 12px; font-weight: 600; color: var(--navy); margin-bottom: 12px; }
+    .metric {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      padding: 6px 0;
+      border-bottom: 1px solid #eee;
+    }
+    .metric:last-child { border-bottom: none; }
+    .metric-value {
+      font-weight: 600;
+      font-family: monospace;
+    }
+    .metric-value.critical { color: #EA4335; }
+    .metric-value.ok { color: #34A853; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Sovereign On-Premise Agentic AI Workbench</h1>
+    <p>Local inference, local RAG, no external calls — powered by open-weight models</p>
+  </header>
+
+  <div class="container">
+    <div class="grid">
+      <div class="panel">
+        <h2>Task Input</h2>
+
+        <div class="form-group">
+          <label>Attachment (optional)</label>
+          <input type="file" id="file-input" accept=".pdf,.png,.jpg,.jpeg,.tif">
+          <div class="status" id="file-status"></div>
+        </div>
+
+        <div class="form-group">
+          <label>Description</label>
+          <textarea id="task-text" placeholder="e.g. Review the attached inspection report and draft an approval note"></textarea>
+        </div>
+
+        <div class="form-group">
+          <label>Task Type (optional - router will guess)</label>
+          <select id="task-type">
+            <option value="">Auto-detect</option>
+            <option value="document">Document (inspection, SOP)</option>
+            <option value="code">Code (calculation, script)</option>
+            <option value="general">General query</option>
+          </select>
+        </div>
+
+        <button id="submit-btn" onclick="submitTask()">Run Task</button>
+        <div class="status" id="submit-status"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Agent Step Trace</h2>
+        <div id="routing-badge"></div>
+        <div class="trace" id="trace"></div>
+        <div class="status" id="trace-status"></div>
+      </div>
+
+      <div>
+        <div class="panel">
+          <h2>Results</h2>
+          <div id="result-text" style="font-size: 13px; line-height: 1.5; margin-bottom: 16px;"></div>
+          <div id="deliverables-pane"></div>
+        </div>
+
+        <div class="network-status">
+          <h3>Network Monitor</h3>
+          <div class="metric">
+            <span>External Calls</span>
+            <span class="metric-value critical" id="metric-external">0</span>
+          </div>
+          <div class="metric">
+            <span>Local Operations</span>
+            <span class="metric-value ok" id="metric-local">0</span>
+          </div>
+          <div class="metric">
+            <span>Offline Duration</span>
+            <span class="metric-value" id="metric-offline">—</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = 'http://127.0.0.1:8000';
+    let currentTaskId = null;
+    let currentFile = null;
+
+    async function submitTask() {
+      const taskText = document.getElementById('task-text').value.trim();
+      const taskType = document.getElementById('task-type').value;
+
+      if (!taskText) {
+        updateStatus('submit-status', 'Please enter a task description', 'error');
+        return;
+      }
+
+      document.getElementById('submit-btn').disabled = true;
+      updateStatus('submit-status', 'Uploading and starting task...', 'running');
+      clearResults();
+
+      try {
+        let attachmentPath = null;
+        if (currentFile) {
+          const uploadFormData = new FormData();
+          uploadFormData.append('file', currentFile);
+          const uploadResponse = await fetch(`${API_BASE}/api/ingest`, { method: 'POST', body: uploadFormData });
+          const uploadResult = await uploadResponse.json();
+          attachmentPath = uploadResult.source_path;
+          updateStatus('file-status', `Uploaded: ${uploadResult.page_count} page(s)`);
+        }
+
+        const taskPayload = {
+          task: taskText,
+          attachments: attachmentPath ? [attachmentPath] : [],
+          task_type_hint: taskType || null,
+        };
+
+        const taskResponse = await fetch(`${API_BASE}/api/tasks`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(taskPayload),
+        });
+
+        if (!taskResponse.ok) throw new Error(`API error: ${taskResponse.status}`);
+
+        const taskData = await taskResponse.json();
+        currentTaskId = taskData.task_id;
+
+        updateStatus('submit-status', 'Streaming results...', 'running');
+        streamTask(currentTaskId);
+      } catch (err) {
+        updateStatus('submit-status', `Error: ${err.message}`, 'error');
+      } finally {
+        document.getElementById('submit-btn').disabled = false;
+      }
+    }
+
+    async function streamTask(taskId) {
+      const eventSource = new EventSource(`${API_BASE}/api/tasks/${taskId}/stream`);
+      let routingShown = false;
+
+      eventSource.addEventListener('routing', (evt) => {
+        if (routingShown) return;
+        const data = JSON.parse(evt.data).payload;
+        const badge = document.getElementById('routing-badge');
+        badge.innerHTML = `
+          <div class="badge" title="${data.reason}">
+            <strong>Model:</strong> ${data.model_used}<br>
+            <strong>Type:</strong> ${data.task_type}
+          </div>
+        `;
+        routingShown = true;
+      });
+
+      eventSource.addEventListener('step', (evt) => {
+        const step = JSON.parse(evt.data).payload;
+        appendStep(step);
+        updateStatus('trace-status', `Step ${step.step_number}/${step.step_number}`, 'running');
+      });
+
+      eventSource.addEventListener('result', (evt) => {
+        const result = JSON.parse(evt.data).payload;
+        document.getElementById('result-text').textContent = result.final_text;
+
+        if (result.sources && result.sources.length > 0) {
+          const sourcesHtml = '<div class="sources"><strong>Sources Cited:</strong>' +
+            result.sources.map(src => `
+              <div class="source">
+                <div class="source-label">${src.source_path.split('/').pop()} • page ${src.page}</div>
+                <div class="source-text">"${src.snippet}"</div>
+              </div>
+            `).join('') + '</div>';
+          document.getElementById('result-text').innerHTML += sourcesHtml;
+        }
+
+        if (result.deliverables && result.deliverables.length > 0) {
+          const dlHtml = '<div class="deliverables"><strong>Deliverables:</strong>' +
+            result.deliverables.map(dl => `
+              <div class="deliverable">
+                <span>${dl.filename} (${Math.round(dl.size_bytes / 1024)} KB)</span>
+                <a href="${dl.download_url}" download>↓</a>
+              </div>
+            `).join('') + '</div>';
+          document.getElementById('deliverables-pane').innerHTML = dlHtml;
+        }
+      });
+
+      eventSource.addEventListener('done', () => {
+        eventSource.close();
+        updateStatus('trace-status', 'Complete', 'done');
+        updateNetworkStatus(taskId);
+      });
+
+      eventSource.onerror = () => {
+        eventSource.close();
+        updateStatus('trace-status', 'Stream ended', 'done');
+      };
+    }
+
+    function appendStep(step) {
+      const trace = document.getElementById('trace');
+      const stepDiv = document.createElement('div');
+      stepDiv.className = `step ${step.status === 'ok' ? 'ok' : 'error'}`;
+
+      let toolHtml = '';
+      if (step.tool_name) {
+        toolHtml = `
+          <div class="step-tool">
+            <strong>${step.tool_name}</strong>(${JSON.stringify(step.tool_input).slice(0, 80)})
+          </div>
+          <div style="font-size: 11px; color: #666; margin: 6px 0;">→ ${step.tool_output.slice(0, 120)}</div>
+        `;
+      }
+
+      stepDiv.innerHTML = `
+        <div class="step-num">Step ${step.step_number}</div>
+        <div class="step-thought">${step.thought}</div>
+        ${toolHtml}
+        <div style="font-size: 11px; color: #999; margin-top: 6px;">${step.duration_ms} ms • ${step.model_used}</div>
+      `;
+      trace.appendChild(stepDiv);
+      trace.scrollTop = trace.scrollHeight;
+    }
+
+    async function updateNetworkStatus(taskId) {
+      try {
+        const resp = await fetch(`${API_BASE}/api/network`);
+        const status = await resp.json();
+        document.getElementById('metric-external').textContent = status.external_calls;
+        document.getElementById('metric-local').textContent = status.total_operations;
+        if (status.offline_duration_s) {
+          document.getElementById('metric-offline').textContent = `${Math.round(status.offline_duration_s / 60)} min`;
+        }
+      } catch (err) {
+        console.error('Network status fetch failed:', err);
+      }
+    }
+
+    function updateStatus(elemId, text, className) {
+      const elem = document.getElementById(elemId);
+      elem.textContent = text;
+      elem.className = `status ${className || ''}`;
+    }
+
+    function clearResults() {
+      document.getElementById('trace').innerHTML = '';
+      document.getElementById('routing-badge').innerHTML = '';
+      document.getElementById('result-text').textContent = '';
+      document.getElementById('deliverables-pane').innerHTML = '';
+      document.getElementById('trace-status').textContent = '';
+    }
+
+    document.getElementById('file-input').addEventListener('change', (e) => {
+      currentFile = e.target.files?.[0] || null;
+      if (currentFile) {
+        document.getElementById('file-status').textContent = `Selected: ${currentFile.name}`;
+      }
+    });
+  </script>
+</body>
+</html>
