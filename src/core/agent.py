@@ -23,12 +23,15 @@ import json
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterator
 
 from src import config
 from src.contracts import (
     AgentResult,
     AgentStep,
+    Deliverable,
+    DeliverableKind,
     SourceCitation,
     StepStatus,
     TaskRequest,
@@ -109,6 +112,7 @@ class Agent:
 
         steps: list[AgentStep] = []
         citations: list[SourceCitation] = []
+        artifact_paths: list[str] = []
         # Signature -> observation, so an identical repeat is answered from
         # what we already have instead of being run again.
         executed: dict[str, str] = {}
@@ -281,6 +285,9 @@ class Agent:
             if outcome.citations:
                 citations.extend(outcome.citations)
 
+            if outcome.ok and outcome.artifacts:
+                artifact_paths.extend(outcome.artifacts)
+
             step = self._step(
                 step_number,
                 thought=parsed.thought,
@@ -324,6 +331,7 @@ class Agent:
             model_used=decision.model,
             routing_reason=decision.reason,
             sources=_dedupe(citations),
+            deliverables=_deliverables_from_paths(artifact_paths),
             total_duration_ms=int((time.perf_counter() - started) * 1000),
             error=error,
             completed_at=utcnow(),
@@ -512,6 +520,41 @@ def _salvage(steps: list[AgentStep], error: str | None) -> str:
     if thoughts:
         return f"{header}\n\nNo tool call succeeded. The agent's last reasoning was:\n\n{thoughts[-1]}"
     return f"{header}\n\nNo steps completed."
+
+
+def _deliverables_from_paths(paths: list[str]) -> list[Deliverable]:
+    """Turn tool-reported artifact paths into the Deliverable list the UI reads.
+
+    A tool (create_approval_documents, or any future one) reports file paths in
+    ``ToolOutcome.artifacts``; without this, those files exist on disk but the
+    UI's download panel and ``AgentResult.deliverables`` never learn about them.
+    Deduplicated and order-preserved, since a retried tool call can repeat a path.
+    """
+    seen: set[str] = set()
+    deliverables: list[Deliverable] = []
+    for raw_path in paths:
+        if raw_path in seen:
+            continue
+        seen.add(raw_path)
+
+        path = Path(raw_path)
+        if not path.is_file():
+            continue  # a tool reported a path that is gone by the time the run ends
+
+        suffix = path.suffix.lstrip(".").lower()
+        kind = DeliverableKind(suffix) if suffix in set(DeliverableKind) else DeliverableKind.OTHER
+
+        deliverables.append(
+            Deliverable(
+                filename=path.name,
+                path=str(path),
+                kind=kind,
+                size_bytes=path.stat().st_size,
+                download_url=f"/api/deliverables/{path.name}",
+                title=path.stem,
+            )
+        )
+    return deliverables
 
 
 def _dedupe(citations: list[SourceCitation]) -> list[SourceCitation]:

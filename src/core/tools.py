@@ -21,10 +21,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from pydantic import ValidationError
+
 from src import config
 from src.contracts import SourceCitation, ToolSpec
 from src.core.rag import RagIndex, get_index
 from src.core.sandbox import Sandbox, get_sandbox
+from src.io.deliverables.docx import build_approval_note
+from src.io.deliverables.xlsx import build_thickness_assessment
+from src.io.models import ApprovalNoteData, FindingRow, ThicknessAssessmentData
 
 # Text files the agent is allowed to read. Anything else is refused with an
 # explanation rather than being silently decoded as mojibake.
@@ -406,6 +411,67 @@ def _make_run_python(sandbox: Sandbox) -> Callable[..., ToolOutcome]:
     return _tool_run_python
 
 
+def _make_create_approval_documents(downloads_dir: Path) -> Callable[..., ToolOutcome]:
+    """H2/H4.5 - the tool that lets the agent produce real .docx/.xlsx output.
+
+    One call builds both the Word approval note and the Excel thickness
+    assessment from the same findings, since the demo always wants them as a
+    pair. A single call is also more reliable for a small local model than
+    coordinating two tool calls with duplicated arguments.
+    """
+
+    def _tool_create_approval_documents(
+        ref_number: str,
+        equipment: str,
+        inspection_date: str,
+        inspector: str,
+        findings: list[dict],
+        recommendation: str,
+        sources: list[dict] | None = None,
+        reviewing_engineer: str = "",
+    ) -> ToolOutcome:
+        try:
+            finding_rows = [FindingRow.model_validate(row) for row in findings]
+            citations = [SourceCitation.model_validate(source) for source in (sources or [])]
+            note_data = ApprovalNoteData(
+                ref_number=ref_number,
+                equipment=equipment,
+                inspection_date=inspection_date,
+                inspector=inspector,
+                findings=finding_rows,
+                recommendation=recommendation,
+                sources=citations,
+                reviewing_engineer=reviewing_engineer,
+            )
+        except ValidationError as exc:
+            raise ToolError(
+                f"Invalid approval note data: {exc.errors()[0]['msg'] if exc.errors() else exc}. "
+                "Each finding needs at least 'item' and 'observation'; status must be one of "
+                "OK, REFER, CRITICAL, INFO."
+            ) from None
+
+        note = build_approval_note(note_data, output_dir=downloads_dir)
+        sheet = build_thickness_assessment(
+            ThicknessAssessmentData(ref_number=ref_number, equipment=equipment, rows=finding_rows),
+            output_dir=downloads_dir,
+        )
+
+        return ToolOutcome(
+            ok=True,
+            output=(
+                f"Created {note.filename} ({note.size_bytes} bytes, {note.download_url}) and "
+                f"{sheet.filename} ({sheet.size_bytes} bytes, {sheet.download_url})."
+            ),
+            artifacts=[note.path, sheet.path],
+            metadata={
+                "docx_download_url": note.download_url,
+                "xlsx_download_url": sheet.download_url,
+            },
+        )
+
+    return _tool_create_approval_documents
+
+
 def _suggest(filename: str, roots: list[Path], limit: int = 3) -> str:
     """Nearby filenames, so a wrong guess costs one step instead of three."""
     stem = Path(filename).stem.lower()[:4]
@@ -517,6 +583,59 @@ handler=lambda directory=".", _roots=roots: _list_files(directory, _roots),
                 "required": ["code"],
             },
             handler=_make_run_python(sandbox),
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="create_approval_documents",
+            description=(
+                "Produce the final deliverables: a Word approval note and an Excel thickness "
+                "assessment, built from the same findings. Call this once, last, after you have "
+                "the measurements and the cited threshold - not before you have both."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "ref_number": {"type": "string", "description": "Report reference, e.g. INSP-2026-0412."},
+                    "equipment": {"type": "string", "description": "Equipment name and tag."},
+                    "inspection_date": {"type": "string", "description": "e.g. 2026-04-12."},
+                    "inspector": {"type": "string", "description": "Inspector name and certification."},
+                    "findings": {
+                        "type": "array",
+                        "description": "One entry per finding.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "item": {"type": "string", "description": "What was measured, e.g. 'Shell course 2, grid C4'."},
+                                "observation": {"type": "string", "description": "What was found, in plain language."},
+                                "measured_mm": {"type": "number"},
+                                "nominal_mm": {"type": "number"},
+                                "threshold_mm": {"type": "number"},
+                                "status": {"type": "string", "description": "OK | REFER | CRITICAL | INFO"},
+                            },
+                            "required": ["item", "observation"],
+                        },
+                    },
+                    "recommendation": {"type": "string", "description": "The engineering recommendation."},
+                    "sources": {
+                        "type": "array",
+                        "description": "Citations from search_documents to attribute the threshold used.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "document_id": {"type": "string"},
+                                "source_path": {"type": "string"},
+                                "page": {"type": "integer"},
+                                "snippet": {"type": "string"},
+                            },
+                        },
+                    },
+                    "reviewing_engineer": {"type": "string"},
+                },
+                "required": ["ref_number", "equipment", "inspection_date", "inspector", "findings", "recommendation"],
+            },
+            handler=_make_create_approval_documents(config.get_path("app.downloads_dir")),
         )
     )
 
