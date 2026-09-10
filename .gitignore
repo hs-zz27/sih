@@ -52,3 +52,6 @@ models/
 *.onnx
 
 # The demo corpus IS tracked (see data/corpus) - it is part of the submission.
+
+# --- Local scratch: corpus-generation helpers, never committed ---
+local/
