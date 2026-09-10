@@ -63,18 +63,48 @@ All routes return contract-shaped data today; only the bodies change at M7.
 |---|---|---|
 | `GET /api/health` | status | yes |
 | `GET /api/config` | model names, step cap, allowed hosts | yes |
-| `GET /api/tools` | `ToolSpec[]` | stub (M3) |
+| `GET /api/tools` | `ToolSpec[]` | **live (M3)** |
 | `POST /api/ingest` | `IngestResult` | upload real, extraction stub (H1) |
-| `GET /api/documents` | `Document[]` | stub (M6) |
-| `POST /api/tasks` | `AgentResult` | stub (M7) |
-| `GET /api/tasks/{id}` | `AgentResult` | stub (M7) |
-| `GET /api/tasks/{id}/stream` | SSE `StreamEvent` — `routing`/`step`/`result`/`done` | stub (M7) |
+| `GET /api/documents` | `Document[]` | **live (M6)** |
+| `POST /api/tasks` | `AgentResult` | **live (M7)** — add `?background=true` for a streamed run |
+| `GET /api/tasks/{id}` | `AgentResult` | **live (M7)** |
+| `GET /api/tasks/{id}/stream` | SSE `StreamEvent` — `routing`/`step`/`result`/`done` | **live (M7)** |
+| `POST /api/index` | index stats | **live (M6)** — re-index `data/corpus` |
+| `GET /api/search?query=` | `SourceCitation[]` | **live (M6)** |
 | `GET /api/deliverables` | `Deliverable[]` | lists the real directory |
 | `GET /api/deliverables/{filename}` | file download | yes |
 | `GET /api/audit` | `AuditEvent[]` | stub (H4) |
 | `GET /api/network` | `NetworkStatus` | stub (H4) |
 
-Find what is still fake: `grep -rn "STUB (" src/`
+Find what is still fake: `grep -rn "STUB (" src/` — only H1 (OCR extraction) and H4 (audit / network monitor) remain.
+
+## Local inference
+
+The engine talks to a local model server over plain HTTP; there is no provider SDK anywhere.
+`inference.api_style` in `config.yaml` selects the wire format — `ollama` or `openai-compatible`
+(vLLM, llama.cpp, LM Studio) — so moving between the laptop and the GPU box is one line of config.
+
+```bash
+ollama serve
+ollama pull qwen2.5:7b-instruct
+ollama pull qwen2.5-coder:7b
+```
+
+`GET /api/health` reports whether the server is reachable and which configured models it is
+actually missing. Check it before a rehearsal — at demo time a missing model looks identical
+to a broken agent.
+
+### Embedding weights (once, while online)
+
+```bash
+python scripts/fetch_models.py            # downloads into models/embeddings (~92 MB)
+python scripts/fetch_models.py --verify   # re-run with Wi-Fi OFF to prove it loads offline
+```
+
+`src/core/rag.py` sets `HF_HUB_OFFLINE=1` at import, so the runtime never downloads anything.
+If the weights are absent it falls back to a pure-NumPy TF-IDF index and says so in
+`GET /api/health` — retrieval keeps working, but it is lexical, not semantic, and we do not
+claim otherwise.
 
 ## Branches
 

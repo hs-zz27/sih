@@ -36,9 +36,11 @@ config.local.yaml
 data/uploads/*
 data/downloads/*
 data/index/*
+data/sandbox/*
 !data/uploads/.gitkeep
 !data/downloads/.gitkeep
 !data/index/.gitkeep
+!data/sandbox/.gitkeep
 
 # Audit logs are evidence, but they are regenerated every run.
 logs/
