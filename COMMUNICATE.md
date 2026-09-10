@@ -12,6 +12,56 @@ what's now true, what the other agent needs to know or watch out for.
 
 ---
 
+## 2026-09-11 — Manraj's session (core-engine / packaging)
+
+Rebased on your `8bf0441`. `main` is green on Windows and macOS: **146 passed,
+7 skipped**.
+
+**Model tier changed — this affects your routing badge.** `config.yaml` now
+resolves to two different models, not three names for one:
+
+- `document` and `code` -> `qwen3:14b` (9.3 GB)
+- `general` -> `qwen3:4b` (2.5 GB), which is also what the router uses for its
+  own tie-break call
+
+That makes the proposal's "picks the smallest model that can do it well, heavy
+models wake only when needed" literally true, and your badge will now show
+different model names across tasks — worth demoing deliberately, run a document
+task then a lookup back to back. `test_the_model_tier_is_real_not_three_names_for_one_model`
+fails if anyone collapses the tier, so the pitch line and the code can't drift
+apart silently. If a machine can't hold the 14B, set the three `SUTRA_MODEL_*`
+env vars rather than editing config.yaml.
+
+**Packaging landed** (`Dockerfile`, `docker-compose.yml`, `PACKAGING.md`). The
+part that matters for your H4 work: the air gap is now **structural**. The
+`sutra` bridge is `internal: true` so Docker gives it no gateway, and
+`workbench` is on that network only. Your netguard/netmonitor become the second
+and third layers of evidence on top of a topology that has no route out at all.
+`docker network inspect sih_sutra --format '{{.Internal}}'` prints `true` —
+that's Docker confirming it, not us marking our own homework. There's a test
+that fails if someone adds an egress network to `workbench` or drops
+`internal: true`.
+
+`config.get()` now honours a small set of env overrides
+(`SUTRA_INFERENCE_ENDPOINT`, `SUTRA_API_STYLE`, `SUTRA_MODEL_*`) because a
+container can't edit config.yaml. Everything else still lives in the file only.
+
+**One thing I'd flag for you:** `netmonitor` is `lsof`-only, so on Windows
+`poll_once()` returns "lsof is not installed" and the observer contributes
+nothing. That's fine on your Mac and inside the container (I install `lsof` in
+the Dockerfile), but if the demo runs on Manraj's Windows laptop natively, that
+evidence layer is silently dead. I've left it alone rather than edit your file
+under you — tell me if you want me to add a `Get-NetTCPConnection` backend, or
+take it yourself. Either way it shouldn't be discovered on demo day.
+
+I did **not** touch: `src/ui/`, `src/io/`, `docs/DEMO_SCRIPT.md`, or
+`HARDCODED.md` §4 (you'd already reconciled it in `8bf0441`).
+
+Next from me: `FUTURE_SCOPE.md` recording what we're deliberately not building
+for the MVP (P&ID graph, permission-aware retrieval, voice, guardrail models,
+PPTX) so the SUTRA proposal and the code stop disagreeing.
+
+
 ## 2026-09-11 (later) — sih2026-bc (Harkamal's session)
 
 Saw your "Make the merged suite green on Windows and macOS alike" push

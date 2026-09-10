@@ -1,0 +1,80 @@
+# SUTRA Workbench - the whole system, offline.
+#
+#   docker compose up
+#
+# Two containers on one private bridge:
+#
+#   ollama     serves the open-weight models, on its own volume
+#   workbench  the API, the agent, retrieval, and the UI
+#
+# The sovereignty property is enforced by the network topology, not just
+# asserted in a README:
+#
+#   * The `sutra` bridge is `internal: true`, so it has NO route off the host.
+#     Even if something in the stack tried to call out, there is no path.
+#   * `workbench` is on that internal network only. It can reach `ollama` and
+#     nothing else.
+#   * `ollama` gets a second, egress-capable network ONLY so `ollama pull` can
+#     fetch weights during setup. Comment `sutra_setup` out before the demo and
+#     the stack keeps working from its volume with no route out at all.
+#
+# That last line is the one to run in front of judges. See PACKAGING.md.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: sutra-ollama
+    volumes:
+      - ollama_models:/root/.ollama
+    networks:
+      - sutra
+      - sutra_setup        # <- comment out for the air-gapped demo
+    environment:
+      # Keep weights resident so no agent step stalls on a model reload.
+      OLLAMA_KEEP_ALIVE: 30m
+      OLLAMA_HOST: 0.0.0.0
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  workbench:
+    build: .
+    container_name: sutra-workbench
+    depends_on:
+      ollama:
+        condition: service_healthy
+    ports:
+      # Loopback only. Binding 0.0.0.0 would expose the workbench to the LAN,
+      # which is not what "on premise" is supposed to mean.
+      - "127.0.0.1:8000:8000"
+    environment:
+      # The one setting that moves the system between machines. Everything else
+      # about the model lives in config.yaml.
+      SUTRA_INFERENCE_ENDPOINT: http://ollama:11434
+    volumes:
+      # Corpus and generated deliverables live on the host so the judge can open
+      # the .docx in Word without going through the container.
+      - ./data/corpus:/app/data/corpus
+      - ./data/downloads:/app/data/downloads
+      - ./data/uploads:/app/data/uploads
+      - workbench_index:/app/data/index
+      - workbench_audit:/app/logs
+    networks:
+      - sutra              # internal only - no route off the host
+    restart: unless-stopped
+
+networks:
+  sutra:
+    driver: bridge
+    internal: true         # THE sovereignty control: no gateway, no egress
+  sutra_setup:
+    driver: bridge         # setup-time only, for `ollama pull`
+
+volumes:
+  ollama_models:
+  workbench_index:
+  workbench_audit:

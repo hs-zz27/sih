@@ -28,23 +28,23 @@ inference:
   # strips the tags either way, so turning it on cannot break parsing.
   enable_thinking: false
 
-# M2 - one model per task type. On the MVP these may point at the same model
-# with different system prompts and sampling params; the requirement is that the
-# routing decision is VISIBLE, not that the models differ.
+# M2 - one model per task type.
 #
-# Qwen3.5-4B (Apache 2.0, March 2026). Chosen over the 7B class for three
-# reasons that matter to this submission specifically:
-#   * Speed. 3.4 GB and 4B parameters, so it answers fast on a fanless laptop.
-#     A 7B dense model was the demo's biggest latency and thermal risk.
-#   * Native tool calling, which is what the agent loop lives or dies on.
-#   * Natively multimodal (text + image). The problem statement asks for
-#     multimodal open-weight LLMs, so the vision path is the same weights.
-# The 9B variant is a drop-in for the GPU box: change these lines only.
+# This is a REAL tier, not three names for one model. The proposal promises a
+# router that "picks the smallest model that can do it well" so that "heavy
+# models wake only when needed" - so the heavy work goes to Qwen3 14B and the
+# cheap work to Qwen3 4B, and the routing badge shows which one ran.
+#
+#   qwen3:14b  9.3 GB  - drafting, extraction, citation, code. Quality matters.
+#   qwen3:4b   2.5 GB  - short lookups and the router's own tie-break call.
+#
+# Both are Apache 2.0 and both do native tool calling. On a machine that cannot
+# hold the 14B, set every entry to qwen3:4b - one edit here, no code changes.
 models:
-  document: "qwen3.5:4b"
-  code: "qwen3.5:4b"
-  general: "qwen3.5:4b"
-  vision: "qwen3.5:4b"         # same weights - the model is natively multimodal
+  document: "qwen3:14b"
+  code: "qwen3:14b"
+  general: "qwen3:4b"          # also the model the router uses to classify
+  vision: "qwen2.5vl:7b"       # drawings and photos - "should have" scope
 
 agent:
   max_steps: 8                 # M4 - hard cap. A runaway loop mid-demo is fatal.

@@ -144,3 +144,68 @@ def test_sandbox_denies_egress_by_default():
     from src import config
 
     assert config.get("sandbox.network") is False
+
+
+# ---------------------------------------------------------------------------
+# Packaging
+# ---------------------------------------------------------------------------
+
+
+def test_env_override_moves_the_endpoint_without_editing_config():
+    """docker-compose points the workbench at the ollama container this way."""
+    import os
+
+    from src import config
+
+    original = os.environ.get("SUTRA_INFERENCE_ENDPOINT")
+    try:
+        os.environ["SUTRA_INFERENCE_ENDPOINT"] = "http://ollama:11434"
+        assert config.get("inference.endpoint") == "http://ollama:11434"
+    finally:
+        if original is None:
+            os.environ.pop("SUTRA_INFERENCE_ENDPOINT", None)
+        else:
+            os.environ["SUTRA_INFERENCE_ENDPOINT"] = original
+
+    assert config.get("inference.endpoint") != "http://ollama:11434"
+
+
+def test_the_container_hostname_counts_as_local():
+    """`ollama` is a compose service name on an internal bridge, not a public host."""
+    from src.core.llm import endpoint_is_local
+
+    assert endpoint_is_local("http://ollama:11434", allowed_hosts=["ollama", "127.0.0.1"])
+
+
+def test_compose_keeps_the_workbench_off_any_egress_network():
+    """The air gap is enforced by topology, so the topology is tested.
+
+    If someone adds an egress-capable network to `workbench`, or drops
+    `internal: true` from the `sutra` bridge, the sovereignty claim quietly
+    stops being structural and this test says so.
+    """
+    import yaml
+
+    compose = yaml.safe_load((REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+
+    assert compose["networks"]["sutra"]["internal"] is True, (
+        "the sutra bridge must have no gateway - that is the control"
+    )
+    assert compose["services"]["workbench"]["networks"] == ["sutra"], (
+        "the workbench must sit on the internal network only"
+    )
+
+    ports = compose["services"]["workbench"].get("ports", [])
+    assert all(str(p).startswith("127.0.0.1:") for p in ports), (
+        "bind loopback only - exposing the workbench to the LAN is not 'on premise'"
+    )
+
+
+def test_dockerfile_installs_everything_at_build_time():
+    """A cold start with the network unplugged must behave like a warm one."""
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "HF_HUB_OFFLINE=1" in dockerfile
+    assert "fetch_models.py" in dockerfile, "embedding weights must be baked in, not fetched at boot"
+    assert "tesseract-ocr" in dockerfile, "OCR needs the binary, not just pytesseract"
+    assert "lsof" in dockerfile, "the egress observer shells out to lsof"

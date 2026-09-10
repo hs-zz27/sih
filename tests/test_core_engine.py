@@ -800,3 +800,25 @@ def test_health_reports_routing_table_tools_and_index(tmp_path: Path):
     assert "search_documents" in health["tools"]
     assert health["index"]["chunks"] == 1
     assert health["inference_endpoint"]
+
+
+def test_the_model_tier_is_real_not_three_names_for_one_model():
+    """The proposal promises "heavy models wake only when needed".
+
+    That claim is only true if the routing table actually resolves to more than
+    one model, so it is asserted rather than assumed. If someone collapses the
+    tier to fit a smaller machine, this test tells them the pitch line has to
+    change too.
+    """
+    table = Router(use_llm_tiebreak=False).routing_table()
+    assert len(set(table.values())) > 1, (
+        f"all task types resolve to the same model {table} - the 'smallest model that can "
+        "do it well' claim would not be true"
+    )
+    assert table["document"] != table["general"], "heavy work and cheap lookups must differ"
+
+
+def test_the_router_classifies_with_the_cheap_model():
+    """The tie-break call must not wake the 14B just to label a task."""
+    router = Router(use_llm_tiebreak=False)
+    assert router.model_for(TaskType.GENERAL) == router.routing_table()["general"]

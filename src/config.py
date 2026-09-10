@@ -48,8 +48,35 @@ def get_config() -> dict[str, Any]:
     return config
 
 
+# Environment overrides for the handful of settings that legitimately differ
+# per deployment rather than per project. Containers cannot edit config.yaml,
+# and the endpoint is exactly the value docker-compose has to change: the
+# workbench talks to `http://ollama:11434` there and `http://127.0.0.1:11434`
+# on a laptop. Everything else still belongs in config.yaml.
+ENV_OVERRIDES: dict[str, str] = {
+    "SUTRA_INFERENCE_ENDPOINT": "inference.endpoint",
+    "SUTRA_API_STYLE": "inference.api_style",
+    "SUTRA_MODEL_DOCUMENT": "models.document",
+    "SUTRA_MODEL_CODE": "models.code",
+    "SUTRA_MODEL_GENERAL": "models.general",
+}
+
+_KEY_TO_ENV: dict[str, str] = {v: k for k, v in ENV_OVERRIDES.items()}
+
+
 def get(dotted_key: str, default: Any = None) -> Any:
-    """Fetch a nested value, e.g. `get("inference.endpoint")`."""
+    """Fetch a nested value, e.g. `get("inference.endpoint")`.
+
+    An environment variable listed in ``ENV_OVERRIDES`` wins over the file, so a
+    container can be pointed at a different model server without a rebuild.
+    Read at call time rather than at load, so tests can set one with monkeypatch.
+    """
+    env_name = _KEY_TO_ENV.get(dotted_key)
+    if env_name:
+        override = os.environ.get(env_name)
+        if override:
+            return override
+
     node: Any = get_config()
     for part in dotted_key.split("."):
         if not isinstance(node, dict) or part not in node:
