@@ -1,0 +1,76 @@
+# Sovereign On-Premise Agentic AI Workbench - runtime configuration.
+#
+# This file is the ONLY place an endpoint or a path may be written down.
+# PROPOSAL.md ss2.3: "Design the model layer so the endpoint is a config value",
+# so the same code runs against a laptop Ollama or the GPU box without edits.
+#
+# Every host here must be loopback or a LAN address. A public hostname in this
+# file is a P0 bug - it breaks the sovereign claim.
+
+app:
+  name: "Sovereign AI Workbench"
+  # Directory the API serves generated deliverables from.
+  downloads_dir: "data/downloads"
+  uploads_dir: "data/uploads"
+  corpus_dir: "data/corpus"
+  index_dir: "data/index"
+  audit_log: "logs/audit.jsonl"
+
+inference:
+  # Local inference server. Swap this line to move between laptop and GPU box.
+  endpoint: "http://127.0.0.1:11434"
+  api_style: "ollama"          # ollama | openai-compatible (vLLM exposes the latter)
+  request_timeout_s: 120
+  stream: true
+
+# M2 - one model per task type. On the MVP these may point at the same model
+# with different system prompts and sampling params; the requirement is that the
+# routing decision is VISIBLE, not that the models differ.
+models:
+  document: "qwen2.5:7b-instruct"
+  code: "qwen2.5-coder:7b"
+  general: "qwen2.5:7b-instruct"
+  vision: "qwen2.5vl:7b"       # optional - "should have" scope only
+
+agent:
+  max_steps: 8                 # M4 - hard cap. A runaway loop mid-demo is fatal.
+  wall_clock_timeout_s: 180
+  temperature: 0.2
+
+rag:
+  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+  # Weights are pre-cached here; nothing is downloaded at runtime.
+  embedding_cache_dir: "models/embeddings"
+  collection: "mrpl_corpus"
+  chunk_size: 800
+  chunk_overlap: 120
+  top_k: 5
+
+sandbox:
+  timeout_s: 20
+  workdir: "data/sandbox"
+  network: false               # M5 - no egress from generated code, ever.
+
+ingestion:
+  ocr_engine: "tesseract"      # tesseract | paddle
+  ocr_lang: "eng"
+  ocr_dpi: 300
+  # Below this many characters on a page, treat the text layer as empty and OCR it.
+  text_layer_min_chars: 40
+
+audit:
+  enabled: true
+  # H4 - hosts the egress monitor is allowed to see. Anything else counts as
+  # an external call and must surface in the UI as a violation.
+  allowed_hosts:
+    - "127.0.0.1"
+    - "localhost"
+    - "::1"
+
+server:
+  host: "127.0.0.1"
+  port: 8000
+  # The UI is served from the same origin in the demo; this is dev-only.
+  cors_origins:
+    - "http://127.0.0.1:5173"
+    - "http://localhost:5173"
