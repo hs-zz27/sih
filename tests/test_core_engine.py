@@ -224,10 +224,46 @@ def test_a_raising_handler_becomes_an_observation():
     assert not outcome.ok and "boom" in outcome.error
 
 
-def test_file_tools_are_confined_to_the_workbench(registry: ToolRegistry):
-    outcome = registry.dispatch("read_file", {"path": "C:/Windows/System32/drivers/etc/hosts"})
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/etc/hosts",
+        "/etc/passwd",
+        "/tmp/evil.txt",
+        "/Users/nonexistent/.ssh/id_rsa",
+    ],
+)
+def test_file_tools_are_confined_to_the_workbench(registry: ToolRegistry, path: str):
+    """An absolute path outside the allowed roots must be refused as such.
+
+    Use a POSIX-absolute path: a Windows-style path like "C:/Windows/..." is not
+    absolute on POSIX, so it is reinterpreted as a relative path and confined
+    into the workspace - safe, but it exercises the suffix check rather than the
+    confinement check this test exists to cover.
+    """
+    outcome = registry.dispatch("read_file", {"path": path})
     assert not outcome.ok
     assert "outside the workbench" in outcome.error
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "C:/Windows/System32/drivers/etc/hosts",  # not absolute on POSIX
+        "~/.ssh/id_rsa",  # Path does not expanduser(), so ~ stays literal
+    ],
+)
+def test_non_posix_absolute_paths_are_neutralised_not_followed(
+    registry: ToolRegistry, path: str
+):
+    """Refused, and confined into the workspace rather than followed off-disk.
+
+    These do not produce the "outside the workbench" message because neither is
+    an absolute path to POSIX - they are confined, then rejected on suffix or
+    non-existence. What matters is that the read never succeeds.
+    """
+    outcome = registry.dispatch("read_file", {"path": path})
+    assert not outcome.ok
 
 
 def test_traversal_out_of_the_workspace_is_refused():
