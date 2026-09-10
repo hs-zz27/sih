@@ -275,7 +275,14 @@ def resolve_within_roots(raw_path: str, roots: list[Path] | None = None) -> Path
     # Nothing exists yet - a write. Default to the workspace.
     target = (roots[0] / candidate).resolve()
     if not _within(target, roots):
-        raise ToolError(f"Path {raw_path!r} escapes the workbench directories.")
+        # Same wording as the absolute-path branch above: the two differ only in
+        # how the path was written, not in what went wrong. Keeping them
+        # identical also makes the refusal assertable across platforms, since
+        # "/etc/hosts" is absolute on POSIX but relative on Windows.
+        raise ToolError(
+            f"Path {raw_path!r} is outside the workbench directories. "
+            f"Allowed: {', '.join(str(r) for r in roots)}"
+        )
     return target
 
 

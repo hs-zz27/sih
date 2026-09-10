@@ -14,6 +14,26 @@ import pytest
 
 from src.io.ingest import ingest_file
 
+# OCR needs the tesseract *binary*, not just pytesseract. Skip cleanly where it
+# is not installed so the suite stays green on every teammate's machine.
+def _tesseract_available() -> bool:
+    import shutil
+
+    if shutil.which("tesseract"):
+        return True
+    try:
+        import pytesseract
+
+        pytesseract.get_tesseract_version()
+        return True
+    except Exception:
+        return False
+
+
+_NEEDS_OCR = pytest.mark.skipif(
+    not _tesseract_available(), reason="tesseract binary not installed on this machine"
+)
+
 CORPUS = Path(__file__).parent.parent / "data" / "corpus"
 
 
@@ -41,6 +61,7 @@ def test_born_digital_pdf_uses_text_layer(tmp_path):
         "SOP-114_heat_exchanger_inspection_scan.jpg",
     ],
 )
+@_NEEDS_OCR
 def test_degraded_scan_falls_back_to_ocr(filename):
     path = CORPUS / filename
     if not path.exists():
