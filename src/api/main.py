@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -33,6 +34,7 @@ from src.api import fakes
 from src.contracts import (
     AgentResult,
     AuditEvent,
+    AuditEventType,
     Deliverable,
     Document,
     IngestResult,
@@ -49,6 +51,9 @@ from src.contracts import (
 from src.core import demo
 from src.core.orchestrator import Orchestrator, get_orchestrator
 from src.core.router import RoutingDecision
+from src.io import audit, netguard
+from src.io.ingest import ingest_file
+from src.io.netmonitor import get_monitor
 
 
 def engine() -> Orchestrator:
@@ -70,11 +75,19 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     a workbench that cannot pre-warm must still start and explain itself through
     /api/health.
     """
+    # H4: enforcement first, then corroboration. Installing the guard before
+    # anything else touches the network means even the engine pre-warm below is
+    # already covered by it.
+    netguard.install()
+    get_monitor().start()
+
     try:
         await asyncio.to_thread(engine().health)
     except Exception as exc:  # noqa: BLE001
         print(f"[startup] pre-warm skipped: {exc.__class__.__name__}: {exc}")
     yield
+
+    get_monitor().stop()
 
 
 app = FastAPI(
@@ -196,35 +209,45 @@ def record_demo_run(preset_id: str) -> dict[str, Any]:
 
 @app.post("/api/ingest", response_model=IngestResult)
 async def ingest(file: UploadFile) -> IngestResult:
-    """Accept a PDF or image upload and return page-level Documents.
+    """Accept a PDF or image upload, extract it for real, and index it.
 
-    The upload half is real - the file genuinely lands in ``app.uploads_dir`` so
-    the UI's preview pane has something to point at.
-
-    STUB (H1): the extracted text is canned. ``src/io/ingest.py`` replaces the
-    body with PyMuPDF text extraction plus Tesseract OCR fallback.
+    H1: PyMuPDF text-layer extraction with a Tesseract OCR fallback
+    (``src/io/ingest.py``), so a born-digital PDF and a degraded scan both come
+    back as page-level ``Document``s. Newly extracted documents are pushed into
+    the live retrieval index immediately, so an uploaded report is searchable
+    (and citable) in the same run that uploaded it.
     """
     uploads = config.get_path("app.uploads_dir")
     filename = Path(file.filename or "upload.bin").name  # strip any client path
     destination = uploads / f"{new_id('up')}_{filename}"
 
+    started = time.monotonic()
     with destination.open("wb") as handle:
         shutil.copyfileobj(file.file, handle)
 
-    documents = fakes.fake_documents()
-    for document in documents:
-        document.source_path = str(destination)
-        document.metadata["filename"] = filename
+    try:
+        result = ingest_file(destination)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return IngestResult(
-        source_path=str(destination),
-        filename=filename,
-        page_count=len(documents),
-        ocr_pages=len(documents),
-        documents=documents,
-        duration_ms=1450,
-        warnings=["STUB (H1): extracted text is canned, OCR has not run."],
+    # ingest_file() reports the on-disk name (id-prefixed, to avoid collisions);
+    # the API contract's `filename` is the user-facing original name.
+    result.filename = filename
+    result.duration_ms = int((time.monotonic() - started) * 1000)
+
+    if result.documents:
+        engine().index_documents(result.documents)
+
+    audit.emit(
+        AuditEventType.INGEST,
+        f"Ingested {filename} - {result.page_count} page(s), {result.ocr_pages} via OCR",
+        actor="ui",
+        source_path=result.source_path,
+        pages=result.page_count,
+        ocr_pages=result.ocr_pages,
     )
+
+    return result
 
 
 @app.get("/api/documents", response_model=list[Document])
@@ -424,23 +447,49 @@ def download_deliverable(filename: str) -> FileResponse:
 
 @app.get("/api/audit", response_model=list[AuditEvent])
 def audit_log(task_id: str | None = None, limit: int = 200) -> list[AuditEvent]:
-    """Append-only action log.
+    """Append-only action log - the real JSONL file, not fixtures.
 
-    STUB (H4): served from fixtures until ``src/io/audit.py`` writes the real
-    JSONL log.
+    Every ingest, tool call, and network refusal recorded by the running
+    process is here. ``limit`` returns the most recent N events.
     """
-    return fakes.fake_audit_events(task_id)[:limit]
+    return audit.read_events(task_id=task_id, limit=limit)
 
 
 @app.get("/api/network", response_model=NetworkStatus)
 def network_status() -> NetworkStatus:
     """The number the whole submission rests on: external calls.
 
-    STUB (H4): currently an assertion, not evidence. H4 backs it with a real
-    ``lsof -i`` poll or packet capture, because "how do you know?" is the
-    question the judges will ask.
+    Backed by two independent layers, both real:
+
+    * ``netguard`` - an in-process socket guard. Loopback passes; anything else
+      is refused and logged before the exception is raised. Enforcement, not
+      just observation.
+    * ``netmonitor`` - an out-of-process ``lsof -i`` poll of our whole process
+      tree, catching what socket-level patching cannot see (a subprocess
+      opening a raw connection).
+
+    ``external_calls`` counts blocked/observed attempts, not successes - the
+    guard's whole point is that an attempt cannot become a success. A nonzero
+    count here means "the guard caught something," which is itself evidence the
+    guard is doing its job, not a failure of the sovereignty claim.
     """
-    return fakes.fake_network_status(fakes.fake_audit_events())
+    total_ops, external = audit.counts()
+    monitor = get_monitor()
+    violations = [event for event in audit.read_events() if event.external]
+
+    return NetworkStatus(
+        external_calls=external,
+        total_operations=total_ops,
+        local_calls=total_ops - external,
+        offline_since=None,
+        offline_duration_s=monitor.offline_duration_s,
+        monitor=(
+            f"netguard (in-process socket enforcement, installed={netguard.is_installed()}) "
+            f"+ netmonitor (lsof -i poll every {monitor.interval_s}s, running={monitor.running})"
+        ),
+        allowed_hosts=netguard.allowed_hosts(),
+        violations=violations,
+    )
 
 
 # ---------------------------------------------------------------------------

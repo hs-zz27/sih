@@ -9,11 +9,25 @@ from __future__ import annotations
 
 import io
 
+import pymupdf
 import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.contracts import AgentResult, IngestResult, NetworkStatus, TaskStatus, TaskType
+
+
+def _minimal_pdf_bytes(
+    text: str = "SOP-114 - retirement threshold for CDU overhead service: 7.6 mm.",
+) -> bytes:
+    """A genuine, tiny born-digital PDF - /api/ingest now runs real PyMuPDF
+    extraction, so a fake byte string is no longer a valid upload fixture."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), text)
+    data = doc.tobytes()
+    doc.close()
+    return data
 
 client = TestClient(app)
 
@@ -47,13 +61,14 @@ def test_tools_are_json_schema_shaped() -> None:
 def test_ingest_persists_upload_and_returns_documents() -> None:
     response = client.post(
         "/api/ingest",
-        files={"file": ("scan.pdf", io.BytesIO(b"%PDF-1.4 fake"), "application/pdf")},
+        files={"file": ("scan.pdf", io.BytesIO(_minimal_pdf_bytes()), "application/pdf")},
     )
     assert response.status_code == 200
     result = IngestResult.model_validate(response.json())
     assert result.filename == "scan.pdf"
     assert result.page_count == len(result.documents) > 0
     assert all(document.page >= 1 for document in result.documents)
+    assert result.documents[0].metadata["extraction_method"] == "text_layer"
 
 
 @pytest.mark.parametrize(
