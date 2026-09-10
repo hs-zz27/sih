@@ -16,7 +16,8 @@ that is not written down here is a liability, not a feature.
 is not. Anything replayed or canned must be visibly labelled in the UI, in the
 step trace, and here.
 
-Last updated: 12 September 2026 · applies to `feat/training-and-demo`
+Last updated: 11 September 2026 · applies to `main` (feat/core-engine,
+feat/training-and-demo and feat/app-io are all merged in)
 
 ---
 
@@ -77,13 +78,26 @@ The 9B variant is a one-line config change for the GPU box.
 
 Tracked here so the two lists are never confused. Grep for them: `grep -rn "STUB (" src/`
 
-| # | What | Where | Owner |
+**Update, 11 September:** §4.1–4.5 below (the OCR/deliverable/audit/network
+gaps, and the missing `.docx` tool) are now closed on `main`. Keeping the rows
+struck through rather than deleting them, since the demo script and anyone
+scanning git history should be able to see what changed and when — a silently
+vanished row is worse than a visibly closed one.
+
+| # | What | Where | Status |
 |---|---|---|---|
-| 4.1 | OCR extraction in the upload endpoint returns canned text | `src/api/main.py` → `/api/ingest` | H1 — real pipeline exists in `src/io/ingest.py` on `feat/app-io`, not yet wired in |
-| 4.2 | Audit log served from fixtures | `src/api/main.py` → `/api/audit` | H4 — not built |
-| 4.3 | **Network monitor is an assertion, not evidence** | `src/api/main.py` → `/api/network` | H4 — not built. This is the single most important gap: the proposal calls it "the feature the entire claim rests on" |
-| 4.4 | Deliverable files are placeholder text | `src/api/fakes.py` | H2 — real generators exist on `feat/app-io`, not yet wired to the agent |
-| 4.5 | **The agent cannot produce a `.docx`** | `src/core/tools.py` | No `create_approval_note` tool is registered. `build_approval_note()` exists but nothing in the loop calls it |
+| ~~4.1~~ | ~~OCR extraction in the upload endpoint returns canned text~~ | `src/api/main.py` → `/api/ingest` | **Closed.** Calls `src/io/ingest.py` for real (PyMuPDF text-layer extraction, Tesseract OCR fallback below `ingestion.text_layer_min_chars`), and pushes the extracted `Document`s into the live index in the same request. |
+| ~~4.2~~ | ~~Audit log served from fixtures~~ | `src/api/main.py` → `/api/audit` | **Closed.** Reads the real append-only JSONL log (`src/io/audit.py`). |
+| ~~4.3~~ | ~~**Network monitor is an assertion, not evidence**~~ | `src/api/main.py` → `/api/network` | **Closed, at application scope.** Two independent layers: `src/io/netguard.py` patches the socket layer in-process (loopback passes, everything else refused *and* logged before the exception is raised — enforcement, not observation) and `src/io/netmonitor.py` polls `lsof -i` against our whole process tree out-of-process (catches a subprocess opening a raw connection, which socket patching cannot see). Both installed at boot in `lifespan()`, before the engine pre-warm's first request. Live-verified against real sockets and a real `urllib`/`httpx` HTTPS call, not mocks — see the commit for the exact test. **Scope callout for the pitch:** this is application-level enforcement + an in-process-tree poll, not an OS-wide packet capture. Say that distinction out loud if asked "how do you know?" — it is the honest answer and it is still a strong one. |
+| ~~4.4~~ | ~~Deliverable files are placeholder text~~ | `src/api/fakes.py` | **Closed**, and the file is now unused — nothing in `src/api/main.py` imports it any more. `/api/deliverables` lists whatever is genuinely on disk; an empty list means nothing has been generated yet, which is the correct answer, not something to paper over with a placeholder. |
+| ~~4.5~~ | ~~**The agent cannot produce a `.docx`**~~ | `src/core/tools.py`, `src/core/agent.py` | **Closed.** `create_approval_documents` is registered as a tool and builds both the `.docx` and the `.xlsx` in one call. The other half of the gap, found while closing this one: `ToolOutcome.artifacts` was being collected into step metadata but never promoted to `AgentResult.deliverables` anywhere in the loop — so even a working tool's files would not have reached the UI's download panel. Fixed with `_deliverables_from_paths()` in `agent.py`. |
+
+No unbuilt H-side gaps remain as of this update. What has **not** been done: an
+end-to-end run against a real pulled model on this machine (no Ollama model is
+pulled here yet — see `/api/health` → `engine.inference_available`), so treat
+"the agent produces a real .docx from a live run" as component-tested and
+integration-wired, not yet witnessed end-to-end. Verify against the running
+system before the demo script calls the relevant gates `LIVE`.
 
 ---
 
@@ -96,7 +110,9 @@ Stated plainly, because the list above is long and the honest counterweight matt
 - The sandbox is real: subprocess isolation, timeout, and network genuinely blocked — generated code that tries to connect raises `SandboxNetworkBlocked`, and the attempt appears in the trace.
 - The endpoint guard is real: `LLMClient` refuses to construct against a non-local endpoint, and `tests/test_sovereignty.py` fails the build on any provider SDK import or hosted endpoint reference.
 - Routing is real and explained in words on every run.
-- 94 tests pass with no model server and no network.
+- 147 tests pass with no model server and no network (up from 94 - the H-side
+  wiring in section 4 above added its own coverage, including live tests
+  against real sockets, a real degraded scan, and real generated Office files).
 
 ---
 

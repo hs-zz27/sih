@@ -30,7 +30,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
 from src import config
-from src.api import fakes
 from src.contracts import (
     AgentResult,
     AuditEvent,
@@ -418,11 +417,11 @@ async def stream_task(task_id: str) -> StreamingResponse:
 def list_deliverables() -> list[Deliverable]:
     """Everything currently sitting in the served downloads directory.
 
-    This one is real: it lists the directory. The files in it are placeholders
-    until H2 lands.
+    Real: lists whatever create_approval_documents (or a manual write) has
+    actually produced. An empty list means no deliverable has been generated
+    yet in this run - that is the correct answer, not a placeholder to hide it.
     """
     downloads = config.get_path("app.downloads_dir")
-    fakes.fake_deliverables()  # STUB (H2): ensure the placeholders exist to list
 
     items: list[Deliverable] = []
     for path in sorted(downloads.iterdir()):

@@ -148,11 +148,23 @@ def test_unknown_task_is_404() -> None:
 
 
 def test_deliverable_download_round_trips() -> None:
-    deliverables = client.get("/api/deliverables").json()
-    assert deliverables
-    response = client.get(deliverables[0]["download_url"])
-    assert response.status_code == 200
-    assert response.content
+    """list_deliverables() no longer auto-seeds placeholders (an empty list is
+    the honest answer when nothing has been generated), so this test supplies
+    its own real fixture file rather than relying on that former behaviour."""
+    from src import config
+
+    downloads = config.get_path("app.downloads_dir")
+    fixture = downloads / "test_round_trip_fixture.txt"
+    fixture.write_text("fixture content for the download round-trip test")
+    try:
+        deliverables = client.get("/api/deliverables").json()
+        assert any(d["filename"] == fixture.name for d in deliverables)
+        matching = next(d for d in deliverables if d["filename"] == fixture.name)
+        response = client.get(matching["download_url"])
+        assert response.status_code == 200
+        assert response.content
+    finally:
+        fixture.unlink(missing_ok=True)
 
 
 def test_deliverable_path_traversal_is_refused() -> None:
