@@ -38,6 +38,7 @@ from src.contracts import (
     IngestResult,
     NetworkStatus,
     SourceCitation,
+    TaskStatus,
     StreamEvent,
     TaskRequest,
     TaskType,
@@ -45,6 +46,7 @@ from src.contracts import (
     new_id,
     utcnow,
 )
+from src.core import demo
 from src.core.orchestrator import Orchestrator, get_orchestrator
 from src.core.router import RoutingDecision
 
@@ -147,6 +149,44 @@ def list_tools() -> list[ToolSpec]:
     the model can call.
     """
     return engine().tool_specs()
+
+
+@app.get("/api/demo")
+def demo_status() -> dict[str, Any]:
+    """Rehearsed presets and exactly which demo shortcuts are active.
+
+    Deliberately exposed rather than hidden: the UI shows it, and a judge asking
+    "what is pinned here?" gets a straight answer from the running system rather
+    than from a slide. Everything listed also appears in HARDCODED.md.
+    """
+    return demo.status()
+
+
+@app.post("/api/demo/record/{preset_id}")
+def record_demo_run(preset_id: str) -> dict[str, Any]:
+    """Run a preset live and cache the result as the fallback for that preset.
+
+    Run this during rehearsal on the demo machine. A cache recorded anywhere
+    else, or against a different model, is worse than none.
+    """
+    item = demo.preset(preset_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"No demo preset {preset_id!r}")
+
+    result = engine().run(TaskRequest(task=item.task, task_type_hint=item.task_type_hint))
+    if result.status is TaskStatus.FAILED:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Refusing to cache a failed run: {result.error}",
+        )
+
+    path = demo.record(preset_id, result)
+    return {
+        "preset": preset_id,
+        "cached_to": str(path),
+        "steps": len(result.steps),
+        "status": result.status.value,
+    }
 
 
 # ---------------------------------------------------------------------------
