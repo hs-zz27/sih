@@ -106,6 +106,16 @@ If the weights are absent it falls back to a pure-NumPy TF-IDF index and says so
 `GET /api/health` — retrieval keeps working, but it is lexical, not semantic, and we do not
 claim otherwise.
 
+## Documents
+
+| File | What it is |
+|---|---|
+| [PACKAGING.md](PACKAGING.md) | `docker compose up`, and the air gap as network topology |
+| [HARDCODED.md](HARDCODED.md) | Every demo shortcut, and how to undo it |
+| [FUTURE_SCOPE.md](FUTURE_SCOPE.md) | What the MVP deliberately does not build, and where each piece would attach |
+| [COMMUNICATE.md](COMMUNICATE.md) | Handoff log between the two parallel sessions |
+| [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) | The rehearsed run |
+
 ## Branches
 
 - `main` — protected, PR-only after Step 0.
