@@ -49,6 +49,11 @@ models:
 agent:
   max_steps: 8                 # M4 - hard cap. A runaway loop mid-demo is fatal.
   wall_clock_timeout_s: 180
+  # Figure 2, step 6: before a human sees the answer, check every figure in it
+  # against the passages that were actually retrieved. Costs one model call on a
+  # completed, cited run. In an inspection context a confidently wrong thickness
+  # is worse than no answer, so this is on by default.
+  self_check: true
   temperature: 0.2
 
 rag:

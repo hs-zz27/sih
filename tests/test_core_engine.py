@@ -65,6 +65,19 @@ def make_agent(replies: list[str], registry: ToolRegistry, **kwargs) -> tuple[Ag
 
 
 @pytest.fixture
+def no_self_check(monkeypatch: pytest.MonkeyPatch):
+    """Turn off the Figure-2 self check.
+
+    Used by tests about the loop itself, so their step counts describe the loop
+    rather than the verification pass bolted onto the end of it. The self check
+    has its own tests further down.
+    """
+    import src.core.agent as agent_module
+
+    monkeypatch.setattr(agent_module, "_self_check_enabled", lambda: False)
+
+
+@pytest.fixture
 def registry(tmp_path: Path) -> ToolRegistry:
     index = RagIndex(index_dir=tmp_path / "index", backend="tfidf")
     index.index_documents(
@@ -452,7 +465,7 @@ def test_tfidf_is_declared_non_semantic():
 # ---------------------------------------------------------------------------
 
 
-def test_agent_completes_a_multi_step_task(registry: ToolRegistry):
+def test_agent_completes_a_multi_step_task(registry: ToolRegistry, no_self_check):
     agent, client = make_agent(
         [
             tool_call("Find the threshold.", "search_documents", query="wall thickness escalation threshold"),
@@ -600,7 +613,7 @@ def test_every_step_is_renderable_by_the_ui(registry: ToolRegistry):
         assert step.started_at is not None
 
 
-def test_stream_yields_routing_then_steps_then_result(registry: ToolRegistry):
+def test_stream_yields_routing_then_steps_then_result(registry: ToolRegistry, no_self_check):
     """Routing is emitted by the agent so it is computed exactly once per run."""
     from src.core.router import RoutingDecision
 
@@ -704,7 +717,7 @@ def test_orchestrator_runs_a_task_end_to_end(tmp_path: Path):
     assert orchestrator.get_result(result.task_id) is result
 
 
-def test_background_run_streams_steps_as_they_happen(tmp_path: Path):
+def test_background_run_streams_steps_as_they_happen(tmp_path: Path, no_self_check):
     """The live trace is the demo's visual centrepiece, so the path is tested.
 
     ``start`` must return before the run finishes, and ``events`` must then
@@ -822,3 +835,95 @@ def test_the_router_classifies_with_the_cheap_model():
     """The tie-break call must not wake the 14B just to label a task."""
     router = Router(use_llm_tiebreak=False)
     assert router.model_for(TaskType.GENERAL) == router.routing_table()["general"]
+
+
+# ---------------------------------------------------------------------------
+# Self check (proposal Figure 2, step 6)
+# ---------------------------------------------------------------------------
+
+
+def _cited_run(replies: list[str], registry: ToolRegistry):
+    """A run that retrieves (so it has citations) and then answers."""
+    agent, client = make_agent(replies, registry)
+    return agent, client
+
+
+def test_self_check_appends_a_visible_step(registry: ToolRegistry):
+    agent, _ = _cited_run(
+        [
+            tool_call("Look it up.", "search_documents", query="wall thickness escalation"),
+            final("Escalate below 80 percent of nominal (SOP-114 p.3)."),
+            '{"verified": true, "issues": []}',
+        ],
+        registry,
+    )
+    result = agent.run(TaskRequest(task="Summarise the inspection report and cite the clause"))
+
+    assert result.steps[-1].tool_name == "self_check"
+    assert result.steps[-1].status is StepStatus.OK
+    assert result.steps[-1].metadata["verified"] is True
+    assert [s.step_number for s in result.steps] == list(range(1, len(result.steps) + 1))
+
+
+def test_an_unsupported_claim_is_flagged_on_the_answer(registry: ToolRegistry):
+    """A wrong number must reach the human as flagged, not as fact."""
+    agent, _ = _cited_run(
+        [
+            tool_call("Look it up.", "search_documents", query="wall thickness escalation"),
+            final("Escalate below 65 percent of nominal."),
+            '{"verified": false, "issues": ["65 percent does not appear in the sources; SOP-114 says 80 percent"]}',
+        ],
+        registry,
+    )
+    result = agent.run(TaskRequest(task="Summarise the report and cite the clause"))
+
+    assert result.steps[-1].status is StepStatus.ERROR
+    assert "Self check flagged" in result.final_text
+    assert "80 percent" in result.final_text
+    assert result.status is TaskStatus.COMPLETED, "a flag is a caveat, not a failed run"
+
+
+def test_self_check_is_skipped_when_nothing_was_cited(registry: ToolRegistry):
+    """No sources means nothing to check against - do not burn a model call."""
+    agent, _ = make_agent([final("Two plus two is four.")], registry)
+    result = agent.run(TaskRequest(task="What is two plus two?"))
+
+    assert all(step.tool_name != "self_check" for step in result.steps)
+
+
+def test_a_failing_self_check_never_breaks_the_run(registry: ToolRegistry):
+    """Verification is best-effort: if the checker dies, the answer still stands."""
+
+    class DiesOnCheck:
+        def __init__(self):
+            self.n = 0
+
+        def chat(self, messages, model, temperature=None, max_tokens=None, stop=None):
+            self.n += 1
+            if self.n == 1:
+                return Completion(text=tool_call("Look.", "search_documents", query="thickness"), model=model)
+            if self.n == 2:
+                return Completion(text=final("Escalate below 80 percent."), model=model)
+            raise RuntimeError("checker exploded")
+
+    agent = Agent(registry=registry, router=Router(use_llm_tiebreak=False), client=DiesOnCheck())  # type: ignore[arg-type]
+    result = agent.run(TaskRequest(task="Summarise the report and cite the clause"))
+
+    assert result.status is TaskStatus.COMPLETED
+    assert "80 percent" in result.final_text
+    assert all(step.tool_name != "self_check" for step in result.steps)
+
+
+def test_self_check_can_be_switched_off(registry: ToolRegistry, monkeypatch: pytest.MonkeyPatch):
+    import src.core.agent as agent_module
+
+    monkeypatch.setattr(agent_module, "_self_check_enabled", lambda: False)
+    agent, _ = _cited_run(
+        [
+            tool_call("Look it up.", "search_documents", query="wall thickness"),
+            final("Escalate below 80 percent."),
+        ],
+        registry,
+    )
+    result = agent.run(TaskRequest(task="Summarise the report and cite the clause"))
+    assert all(step.tool_name != "self_check" for step in result.steps)

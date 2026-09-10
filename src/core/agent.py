@@ -65,6 +65,18 @@ class _Decision:
     raw: str
 
 
+@dataclass
+class _Verdict:
+    """Outcome of the self check."""
+
+    verified: bool
+    issues: list[str]
+
+
+def _self_check_enabled() -> bool:
+    return bool(config.get("agent.self_check", True))
+
+
 class Agent:
     """Runs one task to completion, emitting a step per iteration."""
 
@@ -322,6 +334,46 @@ class Agent:
         if final_answer is None:
             final_answer = _salvage(steps, error)
 
+        # --- 6. self check ------------------------------------------------
+        # The proposal's Figure 2 makes a point of this step: the system checks
+        # its own numbers against the sources before a human ever sees them. In
+        # an inspection context a confidently wrong thickness is worse than no
+        # answer, so a completed, cited answer gets one verification pass.
+        if _self_check_enabled() and status is TaskStatus.COMPLETED and citations:
+            check_started = time.perf_counter()
+            verdict = self._verify(final_answer, citations, decision)
+
+            if verdict is not None:
+                if not verdict.verified and verdict.issues:
+                    final_answer = (
+                        f"{final_answer}\n\n---\n\n"
+                        "**Self check flagged this answer.** The following claims could not be "
+                        "matched against the retrieved sources, and a human reviewer should "
+                        "confirm them before signing:\n\n"
+                        + "\n".join(f"- {issue}" for issue in verdict.issues)
+                    )
+
+                step = self._step(
+                    len(steps) + 1,
+                    thought=(
+                        "Checking every figure in the answer against the retrieved passages "
+                        "before a human sees it."
+                    ),
+                    tool="self_check",
+                    tool_input={"claims_checked": len(citations)},
+                    tool_output=(
+                        "All figures in the answer are supported by the cited passages."
+                        if verdict.verified
+                        else "Unsupported claims found:\n" + "\n".join(f"- {i}" for i in verdict.issues)
+                    ),
+                    status=StepStatus.OK if verdict.verified else StepStatus.ERROR,
+                    model=decision.model,
+                    started=check_started,
+                    metadata={"stage": "self_check", "verified": verdict.verified},
+                )
+                steps.append(step)
+                yield step
+
         return_value = AgentResult(
             task_id=request.task_id,
             status=status,
@@ -348,6 +400,65 @@ class Agent:
             model=decision.model,
             temperature=temperature,
         )
+
+    def _verify(
+        self, answer: str, citations: list[SourceCitation], decision: RoutingDecision
+    ) -> _Verdict | None:
+        """Check the answer's figures against the retrieved passages.
+
+        Returns None if the check itself could not run - a verification failure
+        must never turn a good answer into a failed run, so an unreachable model
+        here simply means no self-check step appears in the trace.
+
+        Deliberately one call with no tools: this is a reading-comprehension
+        question over text we already hold, and giving it the tool loop back
+        would let it wander.
+        """
+        sources = "\n\n".join(
+            f"[{i}] {c.source_path}, page {c.page}:\n{c.snippet}"
+            for i, c in enumerate(citations[:8], start=1)
+        )
+
+        try:
+            completion = self.client.chat(
+                messages=[
+                    Message(
+                        role="system",
+                        content=(
+                            "You are a checker. You are given SOURCES and an ANSWER written from "
+                            "them. Find any number, threshold, limit, equipment tag or procedural "
+                            "claim in the ANSWER that is NOT supported by the SOURCES.\n\n"
+                            "Arithmetic the answer shows its working for counts as supported.\n"
+                            "Do not restate the answer, do not suggest improvements, and do not "
+                            "flag wording.\n\n"
+                            'Reply with one JSON object only:\n'
+                            '{"verified": true, "issues": []}\n'
+                            'or {"verified": false, "issues": ["the claim, and what is missing"]}'
+                        ),
+                    ),
+                    Message(
+                        role="user",
+                        content=f"SOURCES:\n{sources}\n\nANSWER:\n{answer}",
+                    ),
+                ],
+                model=decision.model,
+                temperature=0.0,
+                max_tokens=400,
+            )
+        except Exception:  # noqa: BLE001 - the check is best-effort by design
+            return None
+
+        payload = _parse_json_object(completion.text)
+        if payload is None:
+            return None
+
+        issues = payload.get("issues") or []
+        if not isinstance(issues, list):
+            issues = [str(issues)]
+        issues = [str(i).strip() for i in issues if str(i).strip()][:5]
+
+        verified = bool(payload.get("verified", True)) and not issues
+        return _Verdict(verified=verified, issues=issues)
 
     def _step(
         self,
@@ -491,6 +602,20 @@ def _json_candidates(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _parse_json_object(text: str) -> dict | None:
+    """First JSON object in a model reply, reusing the decision-parser's scanner."""
+    if not text:
+        return None
+    for candidate in _json_candidates(strip_reasoning(text)):
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
 
 
 def _truncate(text: str, limit: int = _MAX_OBSERVATION_CHARS) -> str:
