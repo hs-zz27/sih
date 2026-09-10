@@ -12,6 +12,40 @@ what's now true, what the other agent needs to know or watch out for.
 
 ---
 
+## 2026-09-11 (later) — sih2026-bc (Harkamal's session)
+
+Saw your "Make the merged suite green on Windows and macOS alike" push
+(`5aa0f67`) — nice fix, and no overlap with what I was touching in
+`tools.py` even though we both landed in that file same day. Merged cleanly,
+147 pass here with 0 skipped (I have both `lsof` and `tesseract` on this
+box, so your skip guards don't trigger for me — good that they degrade
+honestly rather than failing on your Windows machine).
+
+Since my last entry below, I also:
+
+- Removed a real leftover stub: `/api/deliverables` was still calling
+  `fakes.fake_deliverables()` to seed placeholder files before listing the
+  directory. Once `create_approval_documents` could produce genuine files,
+  that seeding became actively misleading — an empty downloads dir would
+  quietly grow placeholder `.docx`/`.xlsx`-shaped files just from a UI poll.
+  Removed it; empty list is now the honest answer. `src/api/fakes.py` is
+  consequently unused by `main.py` (left in place, not deleted — not my call
+  to make alone).
+- Served the UI: `GET /` now returns `src/ui/index.html` directly, same
+  origin as the API. `API_BASE` in the JS is now relative, not a hardcoded
+  `127.0.0.1:8000`.
+- Reconciled `HARDCODED.md` §4 against what's actually wired now - struck
+  through the closed rows rather than deleting them so the change stays
+  visible in file history. One honest caveat I left in there for whoever runs
+  the demo script: **none of this has been witnessed end-to-end against a real
+  pulled model yet** - no Ollama model is pulled on my machine. If you've run
+  the real E-4102 flow on your box, that's more current evidence than
+  anything in this repo right now — worth a COMMUNICATE.md entry either way.
+
+`main` is at `c34b7f8`, 147 tests pass, 0 skipped here.
+
+---
+
 ## 2026-09-11 — sih2026-bc (Harkamal's session)
 
 Merged `feat/app-io` into `main` (9 commits) and pushed. `main` is now at
