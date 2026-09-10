@@ -51,16 +51,19 @@ a judge's question about this directly.
 
 | # | What | Value | Why |
 |---|---|---|---|
-| 2.1 | All three task types point at one model | `qwen3.5:4b` | The proposal permits this explicitly: *"may point at the same model with different system prompts and sampling params; the requirement is that the routing decision is VISIBLE."* Routing is real and visible; the destination is currently shared |
-| 2.2 | Thinking mode disabled | `inference.enable_thinking: false` | Qwen3.5 emits `<think>…</think>` before answering. Good for quality, ruinous for demo latency. The parser strips the tags either way, so re-enabling cannot break parsing |
+| 2.1 | Two-model tier, not one model | `qwen3:14b` heavy, `qwen3:4b` light | **No longer a shortcut.** `document` and `code` resolve to the 14B, `general` and the router's own tie-break to the 4B, so the proposal's *"picks the smallest model that can do it well, heavy models wake only when needed"* is literally true and the routing badge shows two different names. A test fails if anyone collapses the tier |
+| 2.2 | Thinking mode disabled | `inference.enable_thinking: false` | Qwen3 and Qwen3.5 emit `<think>…</think>` before answering. Good for quality, ruinous for demo latency. The parser strips the tags either way, so re-enabling cannot break parsing |
 | 2.3 | `keep_alive: 30m` | | Keeps weights resident so no step stalls on a model reload |
 | 2.4 | Engine pre-warmed at boot | `src/api/main.py` → `lifespan` | Loads the embedding model at startup instead of during the judges' first query |
+| 2.5 | Self check runs on every completed, cited run | `agent.self_check: true` | One extra model call verifying the answer's figures against the retrieved passages. Real verification, not a shortcut — listed here because it costs a call and can be switched off |
+| 2.6 | Container air gap | `docker-compose.yml` | The `sutra` bridge is `internal: true`, so the workbench has no route off the host at all. Structural, not asserted — see PACKAGING.md |
 
-**Model choice, for the record.** Qwen3.5-4B (Apache 2.0, March 2026) replaced
-the Qwen2.5-7B named in the original proposal. Reasons: 3.4 GB and 4B params so
-it is fast on a fanless laptop; native tool calling, which the agent loop
-depends on; and it is natively multimodal, which the problem statement asks for.
-The 9B variant is a one-line config change for the GPU box.
+**Model choice, for the record.** The original proposal named Qwen2.5-7B; that was
+replaced first by Qwen3.5-4B and now by the Qwen3 pair the SUTRA document names
+(*"Qwen3 8B or 14B at 4 bit, about 5 to 9 GB"*). Both are Apache 2.0 with native
+tool calling. On a machine that cannot hold the 14B, set `SUTRA_MODEL_DOCUMENT`,
+`SUTRA_MODEL_CODE` and `SUTRA_MODEL_GENERAL` to `qwen3:4b` — but then stop
+claiming the tier in the pitch, because it is no longer there.
 
 ---
 
@@ -118,7 +121,8 @@ Stated plainly, because the list above is long and the honest counterweight matt
 
 ## 6 · Before the demo
 
-- [ ] `ollama pull qwen3.5:4b`
+- [ ] `ollama pull qwen3:14b && ollama pull qwen3:4b`
+- [ ] `python scripts/preflight.py` — must print READY
 - [ ] `python scripts/fetch_models.py --verify` **with Wi-Fi off**
 - [ ] `POST /api/index` to index the corpus
 - [ ] Record a replay for each preset (`POST /api/demo/record/<id>`) on the demo machine
