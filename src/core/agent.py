@@ -36,7 +36,7 @@ from src.contracts import (
     TaskType,
     utcnow,
 )
-from src.core import prompts
+from src.core import demo, prompts
 from src.core.llm import Completion, InferenceError, LLMClient, Message
 from src.core.router import Router, RoutingDecision
 from src.core.tools import ToolRegistry
@@ -333,10 +333,12 @@ class Agent:
     # -- internals --------------------------------------------------------
 
     def _generate(self, conversation: list[Message], decision: RoutingDecision) -> Completion:
+        # Demo mode pins this to 0 so a rehearsed run takes the same path twice.
+        temperature = demo.demo_temperature(float(config.get("agent.temperature", 0.2)))
         return self.client.chat(
             messages=conversation,
             model=decision.model,
-            temperature=float(config.get("agent.temperature", 0.2)),
+            temperature=temperature,
         )
 
     def _step(
@@ -370,6 +372,21 @@ class Agent:
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
+# Qwen3.5 and other reasoning models emit their scratchpad in <think> tags
+# before the answer. That text routinely contains braces and quotes, which would
+# derail brace-matching, so it is removed before anything else looks at the
+# reply. An unclosed tag (a truncated generation) is treated as thinking all the
+# way to the end.
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_OPEN_THINK_RE = re.compile(r"<think>.*$", re.DOTALL | re.IGNORECASE)
+
+
+def strip_reasoning(text: str) -> str:
+    """Remove <think> blocks from a model reply, keeping the answer."""
+    if not text or "<think>" not in text.lower():
+        return text
+    return _OPEN_THINK_RE.sub("", _THINK_RE.sub("", text)).strip()
+
 
 def _parse_decision(text: str) -> _Decision | None:
     """Extract one decision object from a model reply.
@@ -379,6 +396,10 @@ def _parse_decision(text: str) -> _Decision | None:
     rather than bouncing the model on a technicality.
     """
     if not text or not text.strip():
+        return None
+
+    text = strip_reasoning(text)
+    if not text.strip():
         return None
 
     for candidate in _json_candidates(text):

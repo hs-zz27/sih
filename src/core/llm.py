@@ -277,6 +277,11 @@ class LLMClient:
             body["options"] = options
             # Keep the weights resident between steps so the demo has no reload stall.
             body["keep_alive"] = config.get("inference.keep_alive", "30m")
+            # Reasoning models (Qwen3.5) think before answering. Excellent for
+            # quality, ruinous for demo latency, so it is opt-in via config.
+            thinking = config.get("inference.enable_thinking")
+            if thinking is not None:
+                body["think"] = bool(thinking)
         else:
             body["temperature"] = temperature
             if max_tokens is not None:

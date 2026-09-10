@@ -22,15 +22,29 @@ inference:
   api_style: "ollama"          # ollama | openai-compatible (vLLM exposes the latter)
   request_timeout_s: 120
   stream: true
+  keep_alive: "30m"            # keep weights resident so the demo has no reload stall
+  # Qwen3.5 emits <think>...</think> reasoning before its answer. It is useful
+  # for quality and fatal for demo latency, so it is off by default. The agent
+  # strips the tags either way, so turning it on cannot break parsing.
+  enable_thinking: false
 
 # M2 - one model per task type. On the MVP these may point at the same model
 # with different system prompts and sampling params; the requirement is that the
 # routing decision is VISIBLE, not that the models differ.
+#
+# Qwen3.5-4B (Apache 2.0, March 2026). Chosen over the 7B class for three
+# reasons that matter to this submission specifically:
+#   * Speed. 3.4 GB and 4B parameters, so it answers fast on a fanless laptop.
+#     A 7B dense model was the demo's biggest latency and thermal risk.
+#   * Native tool calling, which is what the agent loop lives or dies on.
+#   * Natively multimodal (text + image). The problem statement asks for
+#     multimodal open-weight LLMs, so the vision path is the same weights.
+# The 9B variant is a drop-in for the GPU box: change these lines only.
 models:
-  document: "qwen2.5:7b-instruct"
-  code: "qwen2.5-coder:7b"
-  general: "qwen2.5:7b-instruct"
-  vision: "qwen2.5vl:7b"       # optional - "should have" scope only
+  document: "qwen3.5:4b"
+  code: "qwen3.5:4b"
+  general: "qwen3.5:4b"
+  vision: "qwen3.5:4b"         # same weights - the model is natively multimodal
 
 agent:
   max_steps: 8                 # M4 - hard cap. A runaway loop mid-demo is fatal.
@@ -57,6 +71,20 @@ ingestion:
   ocr_dpi: 300
   # Below this many characters on a page, treat the text layer as empty and OCR it.
   text_layer_min_chars: 40
+
+# MVP demo scaffolding. Everything switched on here is also listed in
+# HARDCODED.md - if you add a shortcut, record it there too.
+demo:
+  enabled: true
+  # Pin sampling to greedy so a rehearsed run takes the same path twice. This is
+  # also simply the right setting for extraction and citation work.
+  deterministic: true
+  # Replay a previously recorded run ONLY if live inference fails, and only for
+  # an exact-match preset task. Replays are stamped demo_replay and carry a
+  # banner in the final text, so they can never pass as live. Set false to make
+  # the demo fail visibly instead.
+  fallback_enabled: true
+  cache_dir: "data/demo_cache"
 
 audit:
   enabled: true

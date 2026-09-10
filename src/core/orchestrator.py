@@ -28,6 +28,7 @@ from src.contracts import (
     ToolSpec,
     utcnow,
 )
+from src.core import demo
 from src.core.agent import Agent
 from src.core.llm import InferenceError, LLMClient, SovereigntyError
 from src.core.rag import RagIndex, get_index
@@ -78,6 +79,7 @@ class Orchestrator:
             "routing_table": self.router.routing_table(),
             "tools": self.registry.names(),
             "index": self.index.stats(),
+            "demo": demo.status(),
         }
         try:
             available, models = self.client.probe()
@@ -123,14 +125,38 @@ class Orchestrator:
         except Exception as exc:  # noqa: BLE001 - the demo must not see a 500
             result = self._failed(request, f"{exc.__class__.__name__}: {exc}")
 
+        result = self._maybe_replay(request, result)
         self._results[result.task_id] = result
         return result
+
+    def _maybe_replay(self, request: TaskRequest, result: AgentResult) -> AgentResult:
+        """Swap a failed rehearsed task for its cached run, clearly labelled.
+
+        Only fires when the run genuinely FAILED, the task text exactly matches a
+        preset, and a run was recorded earlier. A judge who edits the prompt gets
+        the real outcome - including a real failure - because that is the only
+        version of this that survives being questioned.
+        """
+        if result.status is not TaskStatus.FAILED or not demo.fallback_enabled():
+            return result
+
+        preset_id = demo.match_preset(request.task)
+        if preset_id is None:
+            return result
+
+        replay = demo.load_replay(preset_id, request.task_id)
+        if replay is None:
+            return result
+
+        print(f"[demo] live run failed; replaying cached run for preset {preset_id!r}")
+        return replay
 
     def stream(self, request: TaskRequest) -> Iterator[RoutingDecision | AgentStep | AgentResult]:
         """Yield steps live, then the final result. Backs the SSE trace endpoint."""
         try:
             for item in self._agent(request).stream(request):
                 if isinstance(item, AgentResult):
+                    item = self._maybe_replay(request, item)
                     self._results[item.task_id] = item
                 yield item
         except (SovereigntyError, InferenceError) as exc:
