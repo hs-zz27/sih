@@ -12,6 +12,62 @@ what's now true, what the other agent needs to know or watch out for.
 
 ---
 
+## 2026-09-11 (later) — Manraj's session
+
+Pushed through `2bac22c`. **156 passed, 2 skipped** on Windows.
+
+**Read this one first — it was a live demo bug.** The test suite was writing
+into the *real* data directories. After a normal `pytest` run, `data/index`
+held nine fake `%PDF-1.4 fake` uploads from your `/api/ingest` test and **zero**
+corpus documents, so retrieval here was returning `up_dac12e5b2117_scan.pdf`
+with a page number, confidently. If we had demoed without noticing, the agent
+would have cited test fixtures to judges.
+
+Fixed in `tests/conftest.py`: a session fixture redirects index, uploads,
+downloads, sandbox, demo cache and audit log into a temp dir and resets the
+path-caching singletons. Verified a full run now leaves all four real dirs
+untouched. **You will want to clear `data/index` on your machine too and
+re-index** — yours is likely polluted the same way.
+
+**`scripts/preflight.py`** — run before every rehearsal. Checks model server
+reachable, every configured model actually pulled, embeddings cached vs
+silently on the TF-IDF fallback, corpus indexed, retrieval returning a
+page-numbered citation, sandbox refusing sockets, egress observer alive,
+replays recorded. It also fails if the index holds uploads but no corpus, so
+the above can't come back quietly. On my machine: NOT READY (no Ollama, no
+models, corpus unindexed) — everything else green. Your run will differ.
+
+**netmonitor now has a Windows backend.** I did edit your file, having flagged
+it last entry — `netstat -ano` plus a Win32_Process tree walk, dispatched on
+`sys.platform`, POSIX path untouched. Verified against a real held-open socket
+to 1.1.1.1:443, not a mock. Your five netmonitor tests now execute on Windows
+instead of skipping. If the demo runs on Manraj's laptop, that second evidence
+layer is alive now; it was silently dead before.
+
+**Self check (Figure 2, step 6) is in.** On a completed, cited run, one extra
+model call re-reads the retrieved passages against the finished answer and
+flags any figure it cannot support. Shows in the trace as a `self_check` step
+at the end — **worth pointing at during the demo**, it's the "checks its own
+numbers before a human sees it" claim made visible. A flag appends a caveat to
+the answer rather than failing the run, and if the checker call dies the run
+returns exactly what it would have anyway. Off via `agent.self_check: false`.
+
+**`FUTURE_SCOPE.md`** records the eight things we're deliberately not building
+(P&ID graph, permission-aware retrieval, voice, guardrails, PPTX, hash-chained
+audit, multi-user, handwriting) and where each would attach. It says out loud
+that the audit log is append-only but **not** hash-chained, and that prompt
+injection is handled by convention not enforcement — better from us than from a
+judge.
+
+Also: `PACKAGING.md` + compose (air gap is now structural — `internal: true`
+bridge, no gateway), model tier is `qwen3:14b` heavy / `qwen3:4b` light, and
+README has an index of all the docs.
+
+**Still nobody's done an end-to-end run against a live model.** That's the one
+gate left. If you have Ollama and tesseract on your Mac, you're better placed
+than I am — I have neither.
+
+
 ## 2026-09-11 — Manraj's session (core-engine / packaging)
 
 Rebased on your `8bf0441`. `main` is green on Windows and macOS: **146 passed,
