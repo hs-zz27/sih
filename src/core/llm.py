@@ -270,6 +270,17 @@ class LLMClient:
 
         if self.api_style == "ollama":
             options: dict[str, Any] = {"temperature": temperature}
+            # Ollama defaults num_ctx to 2048. Our system prompt alone is ~1300
+            # tokens once the tool schemas are in it, and a single
+            # search_documents result is ~470 more - so the third step of an
+            # agent loop overflows, and Ollama silently truncates from the
+            # front. The first thing evicted is the system prompt, i.e. the tool
+            # schemas, after which the model cannot know that read_file takes a
+            # `path`. That is not a smarter-model problem, it is a context
+            # window we never set. Measured before/after in smoke_e2e.
+            num_ctx = config.get("inference.num_ctx")
+            if num_ctx:
+                options["num_ctx"] = int(num_ctx)
             if max_tokens is not None:
                 options["num_predict"] = max_tokens
             if stop:

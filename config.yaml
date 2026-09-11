@@ -23,6 +23,13 @@ inference:
   request_timeout_s: 120
   stream: true
   keep_alive: "30m"            # keep weights resident so the demo has no reload stall
+  # Ollama's own default is 2048, which this agent loop overflows on its third
+  # step: the system prompt carrying the tool schemas is ~1300 tokens and each
+  # search_documents result adds ~470. On overflow Ollama truncates from the
+  # front, dropping the tool schemas first - after which the model starts
+  # calling read_file with no `path` and list_files with bad arguments, burning
+  # a full round-trip per mistake. 8192 holds a complete run with headroom.
+  num_ctx: 8192
   # Qwen3.5 emits <think>...</think> reasoning before its answer. It is useful
   # for quality and fatal for demo latency, so it is off by default. The agent
   # strips the tags either way, so turning it on cannot break parsing.
@@ -41,8 +48,8 @@ inference:
 # Both are Apache 2.0 and both do native tool calling. On a machine that cannot
 # hold the 14B, set every entry to qwen3:4b - one edit here, no code changes.
 models:
-  document: "qwen3:14b"
-  code: "qwen3:14b"
+  document: "qwen3:4b"
+  code: "qwen3:4b"
   general: "qwen3:4b"          # also the model the router uses to classify
   vision: "qwen2.5vl:7b"       # drawings and photos - "should have" scope
 

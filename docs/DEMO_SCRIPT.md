@@ -48,6 +48,23 @@ This is rehearsal work, not part of the pitch.
 5. Check the retrieval backend shown by the running system. If it says TF-IDF/lexical, use the word “lexical”; do not call it semantic search.
 6. If replay is enabled, inspect the demo status and cache location. A fallback may be used only for an exact, unedited preset after a genuine failure, and its `[CACHED REPLAY …]` banner and per-step `demo_replay: true` marker must be visible.
 7. Pre-warm the local model and keep the backup device/video ready. A backup video must begin with an on-screen `RECORDED OFFLINE REHEARSAL — NOT LIVE` card.
+8. Verify `G7_LIVE_STEP_TRACE`. A completed-result trace is useful for review, but must be called a replayed-after-completion trace, not a live stream.
+
+## Exact task text — do not edit when replay eligibility matters
+
+Use the full-flow prompt only when the full-flow gates are live:
+
+> Read the attached inspection report for heat exchanger E-4102. Find the governing wall-thickness limit in the SOP corpus, calculate the remaining wall as a percentage of nominal, and draft an approval note stating whether it must be escalated. Cite the SOP clause and page you relied on.
+
+The exact standalone calculation preset is the safe limited-path proof of the sandbox:
+
+> Nominal wall thickness is 12.0 mm and the measured minimum is 9.1 mm. Write and run Python to compute the remaining wall as a percentage of nominal and the absolute metal loss in mm. Show the numbers you used.
+
+For the Wi-Fi-off retrieval probe, use this exact preset only when its corpus gate is live:
+
+> What is the wall-thickness reading below which an inspection finding must be escalated, and who must it be escalated to? Cite the source document and page.
+
+Changing any of these prompts makes it a real new task. It is then ineligible for an exact-preset cached replay.
 
 ## Running order — exactly six minutes
 
