@@ -29,11 +29,14 @@ openpyxl>=3.1,<4.0
 # --- Manraj (feat/core-engine) ------------------------------------------
 # M1 - local inference client (plain HTTP against Ollama/vLLM, no SDK)
 httpx>=0.27,<1.0
-# M6 - local RAG. Both must run fully offline once the model is cached:
-#      export HF_HUB_OFFLINE=1 / SENTENCE_TRANSFORMERS_HOME=./models
-sentence-transformers>=3.0,<6.0
-chromadb>=0.5,<2.0
+# M6 - local RAG. The index itself is a custom persisted numpy store
+# (src/core/rag.py), not a vector DB - chromadb was in the Step-0 plan but was
+# never implemented that way, so it is not listed here. Must run fully
+# offline once the model is cached: HF_HUB_OFFLINE=1 (set in rag.py) +
+# rag.embedding_cache_dir. Verified against 6.0.1 on Python 3.14 (macOS ARM64).
+sentence-transformers>=3.0,<7.0
 
 # --- Dev / CI ------------------------------------------------------------
+# FastAPI's TestClient runs async routes synchronously, so no test in this repo
+# needs an async test runner - pytest-asyncio was never actually required.
 pytest>=8.2,<9.0
-pytest-asyncio>=0.23,<2.0
