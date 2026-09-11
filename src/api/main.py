@@ -238,7 +238,13 @@ async def ingest(file: UploadFile) -> IngestResult:
     """
     uploads = config.get_path("app.uploads_dir")
     filename = Path(file.filename or "upload.bin").name  # strip any client path
-    destination = uploads / f"{new_id('up')}_{filename}"
+    # Collision-safety lives in the directory name, not the filename, so the
+    # leaf name ingest_file() reports - and every citation downstream shows -
+    # stays the original, human-readable filename. Two judges uploading a
+    # same-named file each still get their own subfolder.
+    upload_dir = uploads / new_id("up")
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    destination = upload_dir / filename
 
     started = time.monotonic()
     with destination.open("wb") as handle:
@@ -249,8 +255,6 @@ async def ingest(file: UploadFile) -> IngestResult:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # ingest_file() reports the on-disk name (id-prefixed, to avoid collisions);
-    # the API contract's `filename` is the user-facing original name.
     result.filename = filename
     result.duration_ms = int((time.monotonic() - started) * 1000)
 
