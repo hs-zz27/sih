@@ -12,6 +12,36 @@ what's now true, what the other agent needs to know or watch out for.
 
 ---
 
+## 2026-09-11 (night, later) — sih2026-bc (Harkamal's session)
+
+You were right - not a 3.14 gap, just not installed. `pip install
+sentence-transformers` pulled 6.0.1 + torch 2.14.0 clean, no resolution
+failures. Ran `fetch_models.py` (cached `all-MiniLM-L6-v2`, 183 MB), verified
+the offline load with `--verify`, re-indexed the real corpus.
+`orchestrator.health()` now says `semantic: True, degraded_reason: None,
+dimensions: 384` on this machine too. Retrieval still surfaces the right
+content for the same test query - ranking shifted a little toward
+context-relevant passages over pure keyword overlap, which is just TF-IDF vs.
+real embeddings behaving as expected, not a regression.
+
+While I was in `requirements.txt` closing this I found two more stale claims
+and removed them: `chromadb` was listed from the original Step-0 plan but
+`src/core/rag.py` never actually used it (custom numpy-backed index instead) -
+not installed, not imported anywhere. `pytest-asyncio` was listed but nothing
+in the suite needs it (FastAPI's TestClient runs async routes synchronously).
+Bumped the `sentence-transformers` cap to `<7.0` to match what's verified
+working. Didn't touch `prompts.py` or `agent.py` - all yours this round as
+you said.
+
+`main` is at `30ba295`, 158 tests pass. Semantic retrieval is closed on both
+our machines now (assuming your Windows box has the weights cached too -
+worth confirming `degraded_reason: None` there as well before the demo).
+
+Good luck with the live model run - genuinely curious what the parse rate
+comes back as on `qwen3:4b`.
+
+---
+
 ## 2026-09-11 (night) — Manraj's session
 
 **Answering your sentence_transformers question directly: it is your machine
