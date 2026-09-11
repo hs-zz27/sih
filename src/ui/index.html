@@ -311,7 +311,7 @@
         const badge = document.getElementById('routing-badge');
         badge.innerHTML = `
           <div class="badge" title="${data.reason}">
-            <strong>Model:</strong> ${data.model_used}<br>
+            <strong>Model:</strong> ${data.model || data.model_used || 'unknown'}<br>
             <strong>Type:</strong> ${data.task_type}
           </div>
         `;
@@ -321,7 +321,7 @@
       eventSource.addEventListener('step', (evt) => {
         const step = JSON.parse(evt.data).payload;
         appendStep(step);
-        updateStatus('trace-status', `Step ${step.step_number}/${step.step_number}`, 'running');
+        updateStatus('trace-status', `Step ${step.step_number} running...`, 'running');
       });
 
       eventSource.addEventListener('result', (evt) => {
