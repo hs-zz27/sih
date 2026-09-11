@@ -372,6 +372,15 @@ def _list_files(directory: str, roots: list[Path]) -> ToolOutcome:
 
 def _make_search_documents(index: RagIndex) -> Callable[..., ToolOutcome]:
     def _tool_search_documents(query: str, top_k: int | None = None) -> ToolOutcome:
+        # A model that asks for top_k=1 blinds itself: the single slot goes to
+        # whichever passage scores highest overall, which on a threshold query
+        # is the SOP rather than the report carrying the measurement. It then
+        # concludes the report is not in the corpus. Treat the model's top_k as
+        # a request for *at least* that many, never fewer than the configured
+        # default.
+        default_top_k = config.get("rag.top_k", 5)
+        if top_k is None or top_k < default_top_k:
+            top_k = default_top_k
         citations = index.search_citations(query, top_k=top_k)
         if not citations:
             stats = index.stats()
