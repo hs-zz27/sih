@@ -172,6 +172,37 @@
     }
     .metric-value.critical { color: #EA4335; }
     .metric-value.ok { color: #34A853; }
+    .metric-value.neutral { color: var(--grey); }
+
+    /* HARDCODED.md 1.4: a replayed run must never be able to pass as live. */
+    .replay-banner {
+      background: var(--refer);
+      border: 1px solid #E8A33D;
+      border-radius: 4px;
+      padding: 10px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #7A4A00;
+      margin-bottom: 12px;
+    }
+    .failed-banner {
+      background: var(--critical);
+      border: 1px solid #D93025;
+      border-radius: 4px;
+      padding: 10px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #8A1C13;
+      margin-bottom: 12px;
+    }
+    .monitor-note {
+      font-size: 10px;
+      color: #999;
+      margin-top: 10px;
+      line-height: 1.35;
+      border-top: 1px solid #eee;
+      padding-top: 8px;
+    }
   </style>
 </head>
 <body>
@@ -225,19 +256,23 @@
         </div>
 
         <div class="network-status">
-          <h3>Network Monitor</h3>
+          <h3>Network Monitor <span id="monitor-live" style="font-weight:400;color:#999;">· polling</span></h3>
           <div class="metric">
             <span>External Calls</span>
-            <span class="metric-value critical" id="metric-external">0</span>
+            <span class="metric-value ok" id="metric-external">0</span>
           </div>
           <div class="metric">
             <span>Local Operations</span>
-            <span class="metric-value ok" id="metric-local">0</span>
+            <span class="metric-value neutral" id="metric-local">0</span>
           </div>
           <div class="metric">
             <span>Offline Duration</span>
-            <span class="metric-value" id="metric-offline">—</span>
+            <span class="metric-value neutral" id="metric-offline">—</span>
           </div>
+          <!-- Scope, stated on screen. This is application-level enforcement
+               plus an lsof poll of our process tree - not an OS-wide packet
+               capture, and the demo must not imply otherwise. -->
+          <div class="monitor-note" id="monitor-scope"></div>
         </div>
       </div>
     </div>
@@ -250,8 +285,25 @@
     const API_BASE = window.WORKBENCH_API_BASE || '';
     let currentTaskId = null;
     let currentFile = null;
+    let activeStream = null;
+    let running = false;
+
+    // Everything below builds HTML with template literals, and every value in
+    // them is model output, OCR text, a file path or a tool result. A single
+    // '<' in an OCR'd scan or a print() from run_python would otherwise eat the
+    // rest of the trace panel mid-demo, so nothing reaches innerHTML unescaped.
+    function esc(value) {
+      if (value === null || value === undefined) return '';
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
 
     async function submitTask() {
+      if (running) return;               // a double-click must not start two runs
       const taskText = document.getElementById('task-text').value.trim();
       const taskType = document.getElementById('task-type').value;
 
@@ -260,6 +312,7 @@
         return;
       }
 
+      running = true;
       document.getElementById('submit-btn').disabled = true;
       updateStatus('submit-status', 'Uploading and starting task...', 'running');
       clearResults();
@@ -270,9 +323,20 @@
           const uploadFormData = new FormData();
           uploadFormData.append('file', currentFile);
           const uploadResponse = await fetch(`${API_BASE}/api/ingest`, { method: 'POST', body: uploadFormData });
+          if (!uploadResponse.ok) {
+            // Previously this carried on with source_path undefined and ran the
+            // task against an attachment that was never ingested.
+            let detail = `HTTP ${uploadResponse.status}`;
+            try { detail = (await uploadResponse.json()).detail || detail; } catch (e) {}
+            throw new Error(`Upload failed: ${detail}`);
+          }
           const uploadResult = await uploadResponse.json();
           attachmentPath = uploadResult.source_path;
-          updateStatus('file-status', `Uploaded: ${uploadResult.page_count} page(s)`);
+          const method = (uploadResult.documents && uploadResult.documents[0]
+                          && uploadResult.documents[0].metadata
+                          && uploadResult.documents[0].metadata.extraction_method) || 'unknown';
+          updateStatus('file-status',
+            `Ingested ${uploadResult.page_count} page(s) - ${uploadResult.ocr_pages} via OCR (${method})`);
         }
 
         const taskPayload = {
@@ -281,7 +345,11 @@
           task_type_hint: taskType || null,
         };
 
-        const taskResponse = await fetch(`${API_BASE}/api/tasks`, {
+        // background=true is what makes the trace live. Without it the POST
+        // runs the whole agent loop to completion first, and the "stream" is
+        // then a replay of a finished run - a long spinner followed by an
+        // instant dump, which is the opposite of the thing worth showing.
+        const taskResponse = await fetch(`${API_BASE}/api/tasks?background=true`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(taskPayload),
@@ -292,27 +360,36 @@
         const taskData = await taskResponse.json();
         currentTaskId = taskData.task_id;
 
-        updateStatus('submit-status', 'Streaming results...', 'running');
+        updateStatus('submit-status', 'Running...', 'running');
         streamTask(currentTaskId);
       } catch (err) {
         updateStatus('submit-status', `Error: ${err.message}`, 'error');
-      } finally {
-        document.getElementById('submit-btn').disabled = false;
+        finishRun();
       }
     }
 
-    async function streamTask(taskId) {
+    function finishRun() {
+      running = false;
+      document.getElementById('submit-btn').disabled = false;
+    }
+
+    function streamTask(taskId) {
+      if (activeStream) activeStream.close();
       const eventSource = new EventSource(`${API_BASE}/api/tasks/${taskId}/stream`);
+      activeStream = eventSource;
       let routingShown = false;
+      let finished = false;
 
       eventSource.addEventListener('routing', (evt) => {
         if (routingShown) return;
         const data = JSON.parse(evt.data).payload;
         const badge = document.getElementById('routing-badge');
+        // The wire format keys this 'model'; 'model_used' is kept as a fallback.
+        const model = data.model || data.model_used || 'unknown';
         badge.innerHTML = `
-          <div class="badge" title="${data.reason}">
-            <strong>Model:</strong> ${data.model || data.model_used || 'unknown'}<br>
-            <strong>Type:</strong> ${data.task_type}
+          <div class="badge" title="${esc(data.reason)}">
+            <strong>Model:</strong> ${esc(model)}<br>
+            <strong>Type:</strong> ${esc(data.task_type)}
           </div>
         `;
         routingShown = true;
@@ -326,41 +403,73 @@
 
       eventSource.addEventListener('result', (evt) => {
         const result = JSON.parse(evt.data).payload;
-        document.getElementById('result-text').textContent = result.final_text;
-
-        if (result.sources && result.sources.length > 0) {
-          const sourcesHtml = '<div class="sources"><strong>Sources Cited:</strong>' +
-            result.sources.map(src => `
-              <div class="source">
-                <div class="source-label">${src.source_path.split('/').pop()} • page ${src.page}</div>
-                <div class="source-text">"${src.snippet}"</div>
-              </div>
-            `).join('') + '</div>';
-          document.getElementById('result-text').innerHTML += sourcesHtml;
-        }
-
-        if (result.deliverables && result.deliverables.length > 0) {
-          const dlHtml = '<div class="deliverables"><strong>Deliverables:</strong>' +
-            result.deliverables.map(dl => `
-              <div class="deliverable">
-                <span>${dl.filename} (${Math.round(dl.size_bytes / 1024)} KB)</span>
-                <a href="${dl.download_url}" download>↓</a>
-              </div>
-            `).join('') + '</div>';
-          document.getElementById('deliverables-pane').innerHTML = dlHtml;
-        }
+        renderResult(result);
       });
 
       eventSource.addEventListener('done', () => {
+        finished = true;
         eventSource.close();
+        activeStream = null;
         updateStatus('trace-status', 'Complete', 'done');
-        updateNetworkStatus(taskId);
+        updateStatus('submit-status', '', '');
+        finishRun();
+        refreshNetwork();
       });
 
       eventSource.onerror = () => {
         eventSource.close();
-        updateStatus('trace-status', 'Stream ended', 'done');
+        activeStream = null;
+        if (!finished) {
+          // A genuine drop, not the normal close that follows 'done'.
+          updateStatus('trace-status', 'Stream interrupted before the run finished', 'error');
+        }
+        finishRun();
       };
+    }
+
+    function renderResult(result) {
+      const pane = document.getElementById('result-text');
+      let html = '';
+
+      // HARDCODED.md 1.3/1.4: a cached replay must be unmistakable on screen.
+      const reason = (result.routing_reason || '').toLowerCase();
+      const replayed = reason.includes('cached replay')
+        || (result.steps || []).some(s => s.metadata && s.metadata.demo_replay);
+      if (replayed) {
+        html += `<div class="replay-banner">CACHED REPLAY - this is a previously
+                 recorded run of this exact task, not a live result.</div>`;
+      }
+
+      if (result.status && result.status !== 'completed') {
+        html += `<div class="failed-banner">Run status: ${esc(result.status)}${
+          result.error ? ' - ' + esc(result.error) : ''}</div>`;
+      }
+
+      html += `<div>${esc(result.final_text).replace(/\n/g, '<br>')}</div>`;
+
+      if (result.sources && result.sources.length > 0) {
+        html += '<div class="sources"><strong>Sources Cited:</strong>' +
+          result.sources.map(src => `
+            <div class="source">
+              <div class="source-label">${esc(String(src.source_path).split('/').pop())} &bull; page ${esc(src.page)}</div>
+              <div class="source-text">"${esc(src.snippet)}"</div>
+            </div>
+          `).join('') + '</div>';
+      }
+      pane.innerHTML = html;
+
+      const dlPane = document.getElementById('deliverables-pane');
+      if (result.deliverables && result.deliverables.length > 0) {
+        dlPane.innerHTML = '<div class="deliverables"><strong>Deliverables:</strong>' +
+          result.deliverables.map(dl => `
+            <div class="deliverable">
+              <span>${esc(dl.filename)} (${Math.max(1, Math.round((dl.size_bytes || 0) / 1024))} KB)</span>
+              <a href="${esc(dl.download_url)}" download>&darr;</a>
+            </div>
+          `).join('') + '</div>';
+      } else {
+        dlPane.innerHTML = '';
+      }
     }
 
     function appendStep(step) {
@@ -370,35 +479,55 @@
 
       let toolHtml = '';
       if (step.tool_name) {
+        let args = '';
+        try { args = JSON.stringify(step.tool_input || {}); } catch (e) { args = '{}'; }
         toolHtml = `
           <div class="step-tool">
-            <strong>${step.tool_name}</strong>(${JSON.stringify(step.tool_input).slice(0, 80)})
+            <strong>${esc(step.tool_name)}</strong>(${esc(args.slice(0, 80))})
           </div>
-          <div style="font-size: 11px; color: #666; margin: 6px 0;">→ ${step.tool_output.slice(0, 120)}</div>
+          <div style="font-size: 11px; color: #666; margin: 6px 0; white-space: pre-wrap;">&rarr; ${
+            esc(String(step.tool_output || '').slice(0, 300))}</div>
         `;
       }
 
+      const replayMark = (step.metadata && step.metadata.demo_replay)
+        ? ' <span style="color:#B26A00;">[replay]</span>' : '';
+
       stepDiv.innerHTML = `
-        <div class="step-num">Step ${step.step_number}</div>
-        <div class="step-thought">${step.thought}</div>
+        <div class="step-num">Step ${esc(step.step_number)}${replayMark}</div>
+        <div class="step-thought">${esc(step.thought)}</div>
         ${toolHtml}
-        <div style="font-size: 11px; color: #999; margin-top: 6px;">${step.duration_ms} ms • ${step.model_used}</div>
+        <div style="font-size: 11px; color: #999; margin-top: 6px;">${
+          esc(step.duration_ms)} ms${step.model_used ? ' &bull; ' + esc(step.model_used) : ''}</div>
       `;
       trace.appendChild(stepDiv);
       trace.scrollTop = trace.scrollHeight;
     }
 
-    async function updateNetworkStatus(taskId) {
+    async function refreshNetwork() {
       try {
         const resp = await fetch(`${API_BASE}/api/network`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const status = await resp.json();
-        document.getElementById('metric-external').textContent = status.external_calls;
+
+        // Zero external calls is the headline claim - it must not render in
+        // alarm-red. Red is reserved for an actual nonzero count.
+        const ext = document.getElementById('metric-external');
+        ext.textContent = status.external_calls;
+        ext.className = 'metric-value ' + (status.external_calls > 0 ? 'critical' : 'ok');
+
         document.getElementById('metric-local').textContent = status.total_operations;
-        if (status.offline_duration_s) {
-          document.getElementById('metric-offline').textContent = `${Math.round(status.offline_duration_s / 60)} min`;
-        }
+
+        const offline = document.getElementById('metric-offline');
+        const secs = status.offline_duration_s;
+        offline.textContent = (secs === null || secs === undefined)
+          ? '—'
+          : (secs < 60 ? `${Math.round(secs)} s` : `${Math.round(secs / 60)} min`);
+
+        document.getElementById('monitor-scope').textContent = status.monitor || '';
+        document.getElementById('monitor-live').textContent = '· live';
       } catch (err) {
-        console.error('Network status fetch failed:', err);
+        document.getElementById('monitor-live').textContent = '· unreachable';
       }
     }
 
@@ -411,7 +540,7 @@
     function clearResults() {
       document.getElementById('trace').innerHTML = '';
       document.getElementById('routing-badge').innerHTML = '';
-      document.getElementById('result-text').textContent = '';
+      document.getElementById('result-text').innerHTML = '';
       document.getElementById('deliverables-pane').innerHTML = '';
       document.getElementById('trace-status').textContent = '';
     }
@@ -422,6 +551,12 @@
         document.getElementById('file-status').textContent = `Selected: ${currentFile.name}`;
       }
     });
+
+    // The sovereignty panel is the thing judges watch during the Wi-Fi-off
+    // finale. It used to update only after a task finished, so it sat stale
+    // exactly when it mattered most.
+    refreshNetwork();
+    setInterval(refreshNetwork, 3000);
   </script>
 </body>
 </html>
