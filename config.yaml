@@ -48,8 +48,8 @@ inference:
 # Both are Apache 2.0 and both do native tool calling. On a machine that cannot
 # hold the 14B, set every entry to qwen3:4b - one edit here, no code changes.
 models:
-  document: "qwen3:4b"
-  code: "qwen3:4b"
+  document: "qwen3:14b"
+  code: "qwen3:14b"
   general: "qwen3:4b"          # also the model the router uses to classify
   vision: "qwen2.5vl:7b"       # drawings and photos - "should have" scope
 
