@@ -444,9 +444,45 @@ def _as_finding(row: object) -> object:
         # observation, and the item column says so rather than inventing one.
         head, sep, tail = row.partition(":")
         if sep and tail.strip() and len(head) <= 60:
-            return {"item": head.strip(), "observation": tail.strip()}
-        return {"item": "Finding", "observation": row}
+            finding = {"item": head.strip(), "observation": tail.strip()}
+        else:
+            finding = {"item": "Finding", "observation": row}
+        finding.update(_measurements_in(row))
+        return finding
     return row
+
+
+# "nominal of 9.5 mm", "measured: 7.1", "threshold 7.6mm" - the number has to be
+# next to the word that names it. An unlabelled number is left alone.
+_MEASUREMENT_WORDS = {
+    "measured_mm": r"measur(?:ed|ement)?",
+    "nominal_mm": r"nominal",
+    "threshold_mm": r"threshold|retirement limit|limit",
+}
+
+
+def _measurements_in(text: str) -> dict[str, float]:
+    """Pull labelled millimetre figures out of a finding written as prose.
+
+    The model puts measurements in the sentence rather than in measured_mm /
+    nominal_mm, which leaves the spreadsheet's numeric columns - and so the
+    loss% and margin formulas that reference them - empty. These figures are
+    already in the text the model supplied; lifting them into their own fields
+    is extraction, not invention.
+
+    Only a number the text itself labels is taken. Anything ambiguous stays
+    out: a blank cell in an engineering document is recoverable, a confidently
+    wrong one is not.
+    """
+    found: dict[str, float] = {}
+    for field_name, word in _MEASUREMENT_WORDS.items():
+        gap = r"(?:\s+(?:of|is|was|at|to|value)\b)?[^0-9a-zA-Z]{0,6}"
+        match = re.search(rf"(?:{word})\b{gap}(\d+(?:\.\d+)?)\s*mm\b", text, re.IGNORECASE)
+        if match is None:
+            match = re.search(rf"(?:{word})\b{gap}(\d+(?:\.\d+)?)\b", text, re.IGNORECASE)
+        if match is not None:
+            found[field_name] = float(match.group(1))
+    return found
 
 
 _CITATION_PAGE = re.compile(r"\bp(?:age)?\s*\.?\s*(\d+)", re.IGNORECASE)
