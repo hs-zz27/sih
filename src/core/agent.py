@@ -19,6 +19,7 @@ The loop yields steps as it goes, so the SSE endpoint can stream them live.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import time
@@ -507,6 +508,27 @@ def strip_reasoning(text: str) -> str:
     return _OPEN_THINK_RE.sub("", _THINK_RE.sub("", text)).strip()
 
 
+def _loads_lenient(candidate: str) -> object | None:
+    """Parse one candidate as JSON, falling back to a Python literal.
+
+    The model sometimes emits `{'tool': 'x', 'tool_input': {...}}` - a Python
+    dict repr, single quotes - instead of JSON. json.loads rejects it, the
+    decision goes unparsed, and the caller shows the raw object to the user as
+    though it were the answer while the tool call it described never runs.
+
+    ast.literal_eval evaluates literals only - no calls, no names, no
+    attribute access - so this cannot execute model-supplied code.
+    """
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return ast.literal_eval(candidate)
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        return None
+
+
 def _parse_decision(text: str) -> _Decision | None:
     """Extract one decision object from a model reply.
 
@@ -522,10 +544,7 @@ def _parse_decision(text: str) -> _Decision | None:
         return None
 
     for candidate in _json_candidates(text):
-        try:
-            payload = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
+        payload = _loads_lenient(candidate)
         if not isinstance(payload, dict):
             continue
 
@@ -609,10 +628,7 @@ def _parse_json_object(text: str) -> dict | None:
     if not text:
         return None
     for candidate in _json_candidates(strip_reasoning(text)):
-        try:
-            payload = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
+        payload = _loads_lenient(candidate)
         if isinstance(payload, dict):
             return payload
     return None
