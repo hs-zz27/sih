@@ -449,6 +449,18 @@ def _as_finding(row: object) -> object:
             finding = {"item": "Finding", "observation": row}
         finding.update(_measurements_in(row))
         return finding
+
+    # A well-formed object still arrives with the measurements written into the
+    # observation sentence rather than into their own fields, which leaves the
+    # spreadsheet's numeric columns empty. Fill only what the model left out.
+    if isinstance(row, dict):
+        observation = row.get("observation")
+        if isinstance(observation, str):
+            filled = dict(row)
+            for field_name, value in _measurements_in(observation).items():
+                if filled.get(field_name) is None:
+                    filled[field_name] = value
+            return filled
     return row
 
 
