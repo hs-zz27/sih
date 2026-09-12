@@ -17,6 +17,7 @@ and its own workspace, and nothing else on the machine.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -427,6 +428,41 @@ def _make_run_python(sandbox: Sandbox) -> Callable[..., ToolOutcome]:
     return _tool_run_python
 
 
+def _as_finding(row: object) -> object:
+    """Accept a bare string where a finding object was expected.
+
+    A small local model writes `findings: ["Shell course 2 is below the
+    threshold"]` about as often as it writes the nested object, and strict
+    validation turned that into four consecutive failed tool calls - two and a
+    half minutes of a six-minute demo - before the agent gave up on the
+    deliverable entirely. The text it does supply is a perfectly good
+    observation, so keep it rather than rejecting the call.
+    """
+    if isinstance(row, str):
+        return {"item": "Finding", "observation": row}
+    return row
+
+
+_CITATION_PAGE = re.compile(r"\bp(?:age)?\s*\.?\s*(\d+)", re.IGNORECASE)
+
+
+def _as_citation(source: object) -> object:
+    """Accept a bare string where a citation object was expected.
+
+    Same failure as _as_finding: the model cites "REPORT.jpg, page 1" as a
+    string. Pull the page number out if it is in there and keep the rest as the
+    path, so a real citation still reaches the document instead of the whole
+    call failing.
+    """
+    if not isinstance(source, str):
+        return source
+    page_match = _CITATION_PAGE.search(source)
+    page = int(page_match.group(1)) if page_match else 1
+    path = source[: page_match.start()] if page_match else source
+    path = path.strip().rstrip(",").strip() or source.strip()
+    return {"document_id": path, "source_path": path, "page": page, "snippet": ""}
+
+
 def _make_create_approval_documents(downloads_dir: Path) -> Callable[..., ToolOutcome]:
     """H2/H4.5 - the tool that lets the agent produce real .docx/.xlsx output.
 
@@ -447,8 +483,8 @@ def _make_create_approval_documents(downloads_dir: Path) -> Callable[..., ToolOu
         reviewing_engineer: str = "",
     ) -> ToolOutcome:
         try:
-            finding_rows = [FindingRow.model_validate(row) for row in findings]
-            citations = [SourceCitation.model_validate(source) for source in (sources or [])]
+            finding_rows = [FindingRow.model_validate(_as_finding(row)) for row in findings]
+            citations = [SourceCitation.model_validate(_as_citation(s)) for s in (sources or [])]
             note_data = ApprovalNoteData(
                 ref_number=ref_number,
                 equipment=equipment,
