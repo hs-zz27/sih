@@ -439,6 +439,12 @@ def _as_finding(row: object) -> object:
     observation, so keep it rather than rejecting the call.
     """
     if isinstance(row, str):
+        # "Shell course 2, grid C4: wall thickness 7.1 mm" splits at the colon
+        # into the location and what was seen there. No colon: it is all
+        # observation, and the item column says so rather than inventing one.
+        head, sep, tail = row.partition(":")
+        if sep and tail.strip() and len(head) <= 60:
+            return {"item": head.strip(), "observation": tail.strip()}
         return {"item": "Finding", "observation": row}
     return row
 
@@ -644,7 +650,11 @@ handler=lambda directory=".", _roots=roots: _list_files(directory, _roots),
             description=(
                 "Produce the final deliverables: a Word approval note and an Excel thickness "
                 "assessment, built from the same findings. Call this once, last, after you have "
-                "the measurements and the cited threshold - not before you have both."
+                "the measurements and the cited threshold - not before you have both.\n"
+                "Put every measurement in its own numeric field - measured_mm, nominal_mm and "
+                "threshold_mm are numbers like 7.1, not text. The spreadsheet computes loss% and "
+                "margin from those cells as live formulas, so a measurement left inside the "
+                "observation sentence produces an empty column and no working to show."
             ),
             input_schema={
                 "type": "object",
